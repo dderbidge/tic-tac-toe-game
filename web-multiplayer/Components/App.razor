@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <title>Order vs Rebellion — Multiplayer</title>
+
+    <meta name="theme-color" content="#0a0518" />
+    <meta name="description" content="A duel of cosmic sigils — multiplayer." />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400&family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+
+    <link rel="stylesheet" href="@Assets["css/theme.css"]" />
+    <link rel="stylesheet" href="@Assets["css/board.css"]" />
+    <link rel="stylesheet" href="@Assets["css/animations.css"]" />
+    <link rel="stylesheet" href="@Assets["css/multiplayer.css"]" />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+
+<body>
+    <Routes @rendermode="InteractiveServer" />
+
+    <!-- Auto-reload when the Blazor circuit can't reconnect (e.g. after a server redeploy).
+         Blazor toggles classes on this element to indicate state:
+           components-reconnect-show       — actively trying
+           components-reconnect-hide       — connected, hide overlay
+           components-reconnect-failed     — couldn't reconnect (server moved on)
+           components-reconnect-rejected   — server rejected the reconnect
+         When we hit failed/rejected, the only useful path is a fresh page load. -->
+    <div id="components-reconnect-modal" class="reconnect-modal">
+        <div class="reconnect-card">
+            <div class="reconnect-spinner" aria-hidden="true"></div>
+            <div class="reconnect-text">Reconnecting…</div>
+            <div class="reconnect-subtext">If this takes too long, the page will reload automatically.</div>
+        </div>
+    </div>
+
+    <script src="_framework/blazor.web.js"></script>
+    <script>
+        (function () {
+            const modal = document.getElementById('components-reconnect-modal');
+            if (!modal) return;
+
+            let reloadTimer = null;
+            const observer = new MutationObserver(() => {
+                if (modal.classList.contains('components-reconnect-failed') ||
+                    modal.classList.contains('components-reconnect-rejected')) {
+                    if (reloadTimer) return;
+                    const text = modal.querySelector('.reconnect-text');
+                    const sub = modal.querySelector('.reconnect-subtext');
+                    if (text) text.textContent = 'Connection lost — reloading…';
+                    if (sub)  sub.textContent = '';
+                    reloadTimer = setTimeout(() => location.reload(), 1500);
+                }
+            });
+            observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
+        })();
+    </script>
+</body>
+
+</html>

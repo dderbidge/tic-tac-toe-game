@@ -1,0 +1,483 @@
+@using System.Linq
+@using Microsoft.AspNetCore.SignalR.Client
+@implements IAsyncDisposable
+@inject LocalGameSession Local
+@inject NavigationManager Nav
+
+<div class="app-shell">
+    <main class="app-main">
+        @switch (_phase)
+        {
+            case AppPhase.MainMenu:
+                <MainMenu OnHotSeat="StartHotSeat"
+                          OnVsComputer="GoToModeSetup"
+                          OnNetwork="GoToNetwork" />
+                break;
+
+            case AppPhase.LocalModeSetup:
+                <ModeSetup OnBack="GoToMainMenu" OnStart="StartVersusComputer" />
+                break;
+
+            case AppPhase.LocalInMatch:
+            case AppPhase.LocalMatchOver:
+                <div class="match-panel">
+                    <div class="status-banner">
+                        @if (_phase == AppPhase.LocalMatchOver)
+                        {
+                            @if (Local.Winner is { } w)
+                            {
+                                <span class="status-text status-@FactionClass(w)">@ThemeText.WinMessage(w)</span>
+                            }
+                            else if (Local.IsDraw)
+                            {
+                                <span class="status-text">@ThemeText.DrawMessage()</span>
+                            }
+                        }
+                        else if (Local.AiThinking)
+                        {
+                            <span class="status-text status-@FactionClass(Local.Active) status-thinking">
+                                @ThemeText.NameOf(Local.Active) considers the grid…
+                            </span>
+                        }
+                        else
+                        {
+                            <span class="status-text status-@FactionClass(Local.Active)">
+                                @ThemeText.NameOf(Local.Active) — claim a sector
+                            </span>
+                        }
+                    </div>
+
+                    <BoardView Board="Local.Board"
+                               HoverPlayer="@(Local.VersusComputer ? Local.HumanSide : Local.Active)"
+                               AcceptingClicks="@(_phase == AppPhase.LocalInMatch && !Local.AiThinking && (!Local.VersusComputer || Local.Active == Local.HumanSide))"
+                               WinningCells="Local.WinningCells"
+                               OnCellClick="OnLocalCellClick" />
+
+                    <ScoreBoard AscendantWins="Local.AscendantWins"
+                                VanguardWins="Local.VanguardWins"
+                                Draws="Local.Draws"
+                                ShowReset="true"
+                                OnReset="ResetLocalScore" />
+
+                    @if (_phase == AppPhase.LocalMatchOver)
+                    {
+                        <div class="menu-buttons">
+                            <button class="btn btn-primary" @onclick="PlayAgainLocal">Play again</button>
+                            <button class="btn btn-secondary" @onclick="GoToMainMenu">Main menu</button>
+                        </div>
+                    }
+                </div>
+                break;
+
+            case AppPhase.NetworkConnecting:
+                <div class="menu-panel">
+                    <h2 class="subtitle">Connecting…</h2>
+                    <div class="menu-buttons">
+                        <button class="btn btn-secondary" @onclick="GoToMainMenu">Cancel</button>
+                    </div>
+                </div>
+                break;
+
+            case AppPhase.NetworkLobby:
+                <Lobby YourName="@_yourName"
+                       Players="@_lobbyPlayers"
+                       PendingChallengeFor="@_pendingTargetName"
+                       OnChallenge="ChallengePlayerByConnId"
+                       OnCancelPending="CancelPendingChallenge"
+                       OnLeave="LeaveNetwork" />
+                break;
+
+            case AppPhase.NetworkInMatch:
+            case AppPhase.NetworkMatchOver:
+                <div class="match-panel">
+                    <div class="status-banner">
+                        @if (_phase == AppPhase.NetworkMatchOver)
+                        {
+                            <span class="status-text status-@(_netResultClass)">@_netEndMessage</span>
+                        }
+                        else
+                        {
+                            <span class="status-text status-@FactionClass(_netActiveFaction)">
+                                @(_netActiveFaction == _yourFaction
+                                    ? "Your move"
+                                    : $"{_opponentName}'s move…")
+                            </span>
+                        }
+                    </div>
+
+                    @if (_opponentDisconnected)
+                    {
+                        <DisconnectBanner OpponentName="@_opponentName" InitialSeconds="30" />
+                    }
+
+                    <BoardView Board="@_netBoard"
+                               HoverPlayer="@_yourFaction"
+                               AcceptingClicks="@(_phase == AppPhase.NetworkInMatch && _netActiveFaction == _yourFaction && !_opponentDisconnected)"
+                               WinningCells="@_netWinningCells"
+                               OnCellClick="OnNetCellClick" />
+
+                    @if (_phase == AppPhase.NetworkMatchOver)
+                    {
+                        <div class="menu-buttons">
+                            <button class="btn btn-primary" @onclick="ReturnToLobby">Back to lobby</button>
+                            <button class="btn btn-secondary" @onclick="GoToMainMenu">Main menu</button>
+                        </div>
+                    }
+                </div>
+                break;
+        }
+
+        @if (_incomingChallengeId is not null)
+        {
+            <ChallengePrompt FromName="@(_incomingChallengeFromName!)"
+                             TotalSeconds="30"
+                             OnAccept="AcceptChallenge"
+                             OnDecline="DeclineChallenge" />
+        }
+    </main>
+</div>
+
+@code {
+    private enum AppPhase
+    {
+        MainMenu, LocalModeSetup, LocalInMatch, LocalMatchOver,
+        NetworkConnecting, NetworkLobby, NetworkInMatch, NetworkMatchOver
+    }
+
+    private AppPhase _phase = AppPhase.MainMenu;
+
+    // Network state
+    private Microsoft.AspNetCore.SignalR.Client.HubConnection? _hub;
+    private string _yourConnId = "";
+    private string _yourName = "";
+    private List<Lobby.LobbyEntry> _lobbyPlayers = new();
+    private string? _pendingChallengeId;
+    private string? _pendingTargetName;
+    private string? _incomingChallengeId;
+    private string? _incomingChallengeFromConnId;
+    private string? _incomingChallengeFromName;
+    private string? _matchId;
+    private string _opponentName = "";
+    private Player _yourFaction = Player.None;
+    private Board _netBoard = new();
+    private Player _netActiveFaction = Player.Ascendant;
+    private (int row, int col)[]? _netWinningCells;
+    private string? _netEndMessage;
+    private string _netResultClass = "ascendant";
+    private bool _opponentDisconnected;
+
+    // Lifecycle
+    protected override void OnInitialized()
+    {
+        Local.OnChange += HandleLocalChange;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        Local.OnChange -= HandleLocalChange;
+        if (_hub is not null) await _hub.DisposeAsync();
+    }
+
+    private void HandleLocalChange()
+    {
+        // Only update _phase from Local.Phase if we're currently in a local-mode phase
+        // (don't accidentally jump to Local* from Network*).
+        if (_phase != AppPhase.MainMenu &&
+            _phase != AppPhase.LocalModeSetup &&
+            _phase != AppPhase.LocalInMatch &&
+            _phase != AppPhase.LocalMatchOver)
+            return;
+
+        _phase = Local.Phase switch
+        {
+            LocalPhase.MainMenu  => AppPhase.MainMenu,
+            LocalPhase.ModeSetup => AppPhase.LocalModeSetup,
+            LocalPhase.InMatch   => AppPhase.LocalInMatch,
+            LocalPhase.MatchOver => AppPhase.LocalMatchOver,
+            _ => _phase
+        };
+        InvokeAsync(StateHasChanged);
+    }
+
+    // Local mode handlers
+    private void StartHotSeat() => Local.StartHotSeat();
+    private void GoToModeSetup() => Local.GoToModeSetup();
+    private async Task StartVersusComputer((Player faction, Difficulty difficulty) args)
+        => await Local.StartVersusComputerAsync(args.faction, args.difficulty);
+
+    private void GoToMainMenu()
+    {
+        _phase = AppPhase.MainMenu;
+        Local.GoToMainMenu();
+    }
+
+    private async Task OnLocalCellClick((int row, int col) move)
+        => await Local.TryHumanMoveAsync(move.row, move.col);
+
+    private async Task PlayAgainLocal() => await Local.PlayAgainAsync();
+    private void ResetLocalScore() => Local.ResetScores();
+
+    // Network mode handlers
+    private async Task GoToNetwork()
+    {
+        _phase = AppPhase.NetworkConnecting;
+        StateHasChanged();
+        await EnsureHubAsync();
+        await _hub!.SendAsync("EnterLobby");
+    }
+
+    private async Task LeaveNetwork()
+    {
+        if (_hub is not null) await _hub.SendAsync("LeaveLobby");
+        await TeardownHubAsync();
+        _phase = AppPhase.MainMenu;
+        StateHasChanged();
+    }
+
+    private async Task EnsureHubAsync()
+    {
+        if (_hub is not null) return;
+        var hubUrl = Nav.ToAbsoluteUri("/gamehub");
+        _hub = new Microsoft.AspNetCore.SignalR.Client.HubConnectionBuilder()
+            .WithUrl(hubUrl)
+            .WithAutomaticReconnect()
+            .Build();
+
+        _hub.On<LobbyState>("OnLobbyState", OnLobbyState);
+        _hub.On<PlayerInfo>("OnPlayerJoined", OnPlayerJoined);
+        _hub.On<PlayerLeft>("OnPlayerLeft", OnPlayerLeft);
+        _hub.On<IncomingChallenge>("OnIncomingChallenge", OnIncomingChallenge);
+        _hub.On<ChallengeResolution>("OnChallengeAccepted", OnChallengeAccepted);
+        _hub.On<DeclineMessage>("OnChallengeDeclined", OnChallengeDeclined);
+        _hub.On<ChallengeExpiredMsg>("OnChallengeExpired", OnChallengeExpired);
+        _hub.On<MatchStateMsg>("OnMatchState", OnMatchState);
+        _hub.On<DisconnectInfo>("OnOpponentDisconnected", OnOpponentDisconnected);
+        _hub.On("OnOpponentReconnected", OnOpponentReconnected);
+        _hub.On<MatchEnded>("OnMatchEnded", OnMatchEnded);
+
+        await _hub.StartAsync();
+    }
+
+    private async Task TeardownHubAsync()
+    {
+        if (_hub is null) return;
+        await _hub.DisposeAsync();
+        _hub = null;
+        _yourConnId = "";
+        _yourName = "";
+        _lobbyPlayers.Clear();
+        _pendingChallengeId = null;
+        _pendingTargetName = null;
+        _incomingChallengeId = null;
+        _matchId = null;
+    }
+
+    private async Task ChallengePlayerByConnId(string targetConnId)
+    {
+        if (_hub is null) return;
+        var target = _lobbyPlayers.FirstOrDefault(p => p.ConnId == targetConnId);
+        if (target is null) return;
+        _pendingChallengeId = "(awaiting server)";
+        _pendingTargetName = target.Name;
+        await _hub.SendAsync("ChallengePlayer", targetConnId);
+    }
+
+    private async Task CancelPendingChallenge()
+    {
+        if (_hub is null || _pendingChallengeId is null) return;
+        await _hub.SendAsync("CancelChallenge", _pendingChallengeId);
+        _pendingChallengeId = null;
+        _pendingTargetName = null;
+        StateHasChanged();
+    }
+
+    private async Task AcceptChallenge()
+    {
+        if (_hub is null || _incomingChallengeId is null) return;
+        var id = _incomingChallengeId;
+        _incomingChallengeId = null;
+        await _hub.SendAsync("RespondToChallenge", id, true);
+    }
+
+    private async Task DeclineChallenge()
+    {
+        if (_hub is null || _incomingChallengeId is null) return;
+        var id = _incomingChallengeId;
+        _incomingChallengeId = null;
+        await _hub.SendAsync("RespondToChallenge", id, false);
+        StateHasChanged();
+    }
+
+    private async Task OnNetCellClick((int row, int col) move)
+    {
+        if (_hub is null || _matchId is null) return;
+        await _hub.SendAsync("PlaceMove", _matchId, move.row, move.col);
+    }
+
+    private async Task ReturnToLobby()
+    {
+        _phase = AppPhase.NetworkLobby;
+        _matchId = null;
+        _netBoard = new Board();
+        _netWinningCells = null;
+        _netEndMessage = null;
+        _opponentDisconnected = false;
+        if (_hub is not null) await _hub.SendAsync("EnterLobby");
+        StateHasChanged();
+    }
+
+    // Hub message records
+    private record LobbyState(string yourConnId, string yourName, List<PlayerInfo> players);
+    private record PlayerInfo(string ConnectionId, string Name);
+    private record PlayerLeft(string connId);
+    private record IncomingChallenge(string challengeId, string fromConnId, string fromName);
+    private record ChallengeResolution(string matchId, string opponentName, string yourFaction);
+    private record DeclineMessage(string fromName);
+    private record ChallengeExpiredMsg(string challengeId, string role);
+    private record MatchStateMsg(string matchId, int[][] board, string activeFaction, string? winner, bool isDraw, CellRef[]? winningCells);
+    private record CellRef(int row, int col);
+    private record DisconnectInfo(int secondsLeft);
+    private record MatchEnded(string matchId, string result, string reason, CellRef[]? winningCells);
+
+    // Hub callbacks
+    private void OnLobbyState(LobbyState s)
+    {
+        _yourConnId = s.yourConnId;
+        _yourName = s.yourName;
+        _lobbyPlayers = s.players
+            .Where(p => p.ConnectionId != s.yourConnId)
+            .Select(p => new Lobby.LobbyEntry(p.ConnectionId, p.Name))
+            .ToList();
+        _phase = AppPhase.NetworkLobby;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnPlayerJoined(PlayerInfo p)
+    {
+        if (p.ConnectionId == _yourConnId) return;
+        if (_lobbyPlayers.Any(x => x.ConnId == p.ConnectionId)) return;
+        _lobbyPlayers.Add(new Lobby.LobbyEntry(p.ConnectionId, p.Name));
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnPlayerLeft(PlayerLeft p)
+    {
+        _lobbyPlayers.RemoveAll(x => x.ConnId == p.connId);
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnIncomingChallenge(IncomingChallenge c)
+    {
+        _incomingChallengeId = c.challengeId;
+        _incomingChallengeFromConnId = c.fromConnId;
+        _incomingChallengeFromName = c.fromName;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnChallengeAccepted(ChallengeResolution r)
+    {
+        _matchId = r.matchId;
+        _opponentName = r.opponentName;
+        _yourFaction = r.yourFaction == "Ascendant" ? Player.Ascendant : Player.Vanguard;
+        _netBoard = new Board();
+        _netActiveFaction = Player.Ascendant;
+        _netWinningCells = null;
+        _netEndMessage = null;
+        _opponentDisconnected = false;
+        _phase = AppPhase.NetworkInMatch;
+        _pendingChallengeId = null;
+        _pendingTargetName = null;
+        _incomingChallengeId = null;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnChallengeDeclined(DeclineMessage m)
+    {
+        _pendingChallengeId = null;
+        _pendingTargetName = null;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnChallengeExpired(ChallengeExpiredMsg e)
+    {
+        if (e.role == "from") { _pendingChallengeId = null; _pendingTargetName = null; }
+        else if (e.role == "to") { _incomingChallengeId = null; }
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnMatchState(MatchStateMsg m)
+    {
+        _matchId = m.matchId;
+        _netBoard = DeserializeBoard(m.board);
+        _netActiveFaction = ParsePlayer(m.activeFaction);
+        _netWinningCells = m.winningCells?.Select(c => (c.row, c.col)).ToArray();
+        if (m.winner is not null || m.isDraw)
+        {
+            _phase = AppPhase.NetworkMatchOver;
+        }
+        else
+        {
+            _phase = AppPhase.NetworkInMatch;
+        }
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnOpponentDisconnected(DisconnectInfo d)
+    {
+        _opponentDisconnected = true;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnOpponentReconnected()
+    {
+        _opponentDisconnected = false;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnMatchEnded(MatchEnded e)
+    {
+        _phase = AppPhase.NetworkMatchOver;
+        _netEndMessage = (e.result, e.reason) switch
+        {
+            ("win", "forfeit") => $"{_opponentName} forfeited — you win.",
+            ("loss", "forfeit") => $"You forfeited — {_opponentName} wins.",
+            ("win", _)  => "You hold the line. Victory.",
+            ("loss", _) => $"{_opponentName} holds the line.",
+            ("draw", _) => "Stalemate. The galaxy holds its breath.",
+            _ => "Match ended."
+        };
+        _netResultClass = e.result switch
+        {
+            "win" => _yourFaction == Player.Ascendant ? "ascendant" : "vanguard",
+            "loss" => _yourFaction == Player.Ascendant ? "vanguard" : "ascendant",
+            _ => "none"
+        };
+        _netWinningCells = e.winningCells?.Select(c => (c.row, c.col)).ToArray();
+        InvokeAsync(StateHasChanged);
+    }
+
+    // Helpers
+    private static Board DeserializeBoard(int[][] cells)
+    {
+        var b = new Board();
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++)
+                if (cells[r][c] != 0)
+                    b.TryPlace(r, c, (Player)cells[r][c]);
+        return b;
+    }
+
+    private static Player ParsePlayer(string s) => s switch
+    {
+        "Ascendant" => Player.Ascendant,
+        "Vanguard"  => Player.Vanguard,
+        _           => Player.None
+    };
+
+    private static string FactionClass(Player p) => p switch
+    {
+        Player.Ascendant => "ascendant",
+        Player.Vanguard  => "vanguard",
+        _                => "none"
+    };
+}

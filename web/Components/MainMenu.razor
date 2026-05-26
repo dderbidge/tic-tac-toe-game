@@ -1,0 +1,13 @@
+<div class="menu-panel">
+    <h1 class="title">Order vs Rebellion</h1>
+    <p class="tagline">A duel of cosmic sigils.</p>
+    <div class="menu-buttons">
+        <button class="btn btn-primary" @onclick="OnHotSeat">Hot-seat (two humans)</button>
+        <button class="btn btn-primary" @onclick="OnVsComputer">Versus the computer</button>
+    </div>
+</div>
+
+@code {
+    [Parameter] public EventCallback OnHotSeat { get; set; }
+    [Parameter] public EventCallback OnVsComputer { get; set; }
+}

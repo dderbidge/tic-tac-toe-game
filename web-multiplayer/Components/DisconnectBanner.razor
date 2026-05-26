@@ -1,0 +1,30 @@
+@implements IDisposable
+
+<div class="disconnect-banner">
+    <span>@OpponentName has disconnected.</span>
+    <span class="countdown">@_remaining s</span>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string OpponentName { get; set; } = default!;
+    [Parameter] public int InitialSeconds { get; set; } = 30;
+
+    private System.Timers.Timer? _ticker;
+    private DateTimeOffset _expiresAt;
+    private int _remaining;
+
+    protected override void OnInitialized()
+    {
+        _expiresAt = DateTimeOffset.UtcNow.AddSeconds(InitialSeconds);
+        _remaining = InitialSeconds;
+        _ticker = new System.Timers.Timer(500);
+        _ticker.Elapsed += (_, _) =>
+        {
+            _remaining = Math.Max(0, (int)Math.Ceiling((_expiresAt - DateTimeOffset.UtcNow).TotalSeconds));
+            InvokeAsync(StateHasChanged);
+        };
+        _ticker.Start();
+    }
+
+    public void Dispose() { _ticker?.Stop(); _ticker?.Dispose(); }
+}

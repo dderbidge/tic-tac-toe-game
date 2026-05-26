@@ -1,0 +1,42 @@
+@implements IDisposable
+
+<div class="challenge-modal-backdrop">
+    <div class="challenge-modal">
+        <h3>@FromName wants to duel</h3>
+        <p>The Ascendant moves first.</p>
+        <div class="challenge-countdown-bar"><div style="width: @(_pct.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture))%;"></div></div>
+        <div class="menu-buttons">
+            <button class="btn btn-primary" @onclick="OnAcceptInvoke">Accept</button>
+            <button class="btn btn-secondary" @onclick="OnDeclineInvoke">Decline</button>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string FromName { get; set; } = default!;
+    [Parameter] public int TotalSeconds { get; set; } = 30;
+    [Parameter] public EventCallback OnAccept { get; set; }
+    [Parameter] public EventCallback OnDecline { get; set; }
+
+    private System.Timers.Timer? _ticker;
+    private DateTimeOffset _expiresAt;
+    private double _pct = 100.0;
+
+    protected override void OnInitialized()
+    {
+        _expiresAt = DateTimeOffset.UtcNow.AddSeconds(TotalSeconds);
+        _ticker = new System.Timers.Timer(250);
+        _ticker.Elapsed += (_, _) =>
+        {
+            var remaining = (_expiresAt - DateTimeOffset.UtcNow).TotalSeconds;
+            _pct = Math.Max(0, (remaining / TotalSeconds) * 100.0);
+            InvokeAsync(StateHasChanged);
+        };
+        _ticker.Start();
+    }
+
+    private async Task OnAcceptInvoke() => await OnAccept.InvokeAsync();
+    private async Task OnDeclineInvoke() => await OnDecline.InvokeAsync();
+
+    public void Dispose() { _ticker?.Stop(); _ticker?.Dispose(); }
+}

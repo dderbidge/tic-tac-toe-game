@@ -1,0 +1,20 @@
+[Unit]
+Description=Tic-Tac-Toe Network Multiplayer
+After=network.target
+
+[Service]
+Type=simple
+User={{SERVICE_USER}}
+WorkingDirectory={{PUBLISH_DIR}}
+ExecStart=/usr/bin/dotnet {{PUBLISH_DIR}}/TicTacToe.WebMultiplayer.dll --urls {{LISTEN_URL}}
+Environment=DOTNET_ENVIRONMENT=Production
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths={{INSTALL_DIR}}
+
+[Install]
+WantedBy=multi-user.target

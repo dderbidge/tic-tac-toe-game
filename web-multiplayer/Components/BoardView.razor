@@ -1,0 +1,36 @@
+@using TicTacToe.Core
+
+<div class="board-grid">
+    @for (int r = 0; r < 3; r++)
+    {
+        @for (int c = 0; c < 3; c++)
+        {
+            var row = r;
+            var col = c;
+            <Cell Content="@Board.At(row, col)"
+                  HoverPlayer="@HoverPlayer"
+                  IsHoverEnabled="@(IsCellInteractive(row, col))"
+                  IsHighlighted="@IsWinningCell(row, col)"
+                  OnClick="@(() => OnCellClick.InvokeAsync((row, col)))" />
+        }
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Board Board { get; set; } = default!;
+    [Parameter] public Player HoverPlayer { get; set; } = Player.None;
+    [Parameter] public bool AcceptingClicks { get; set; } = true;
+    [Parameter] public (int row, int col)[]? WinningCells { get; set; }
+    [Parameter] public EventCallback<(int row, int col)> OnCellClick { get; set; }
+
+    private bool IsCellInteractive(int row, int col)
+        => AcceptingClicks && Board.At(row, col) == Player.None && WinningCells is null;
+
+    private bool IsWinningCell(int row, int col)
+    {
+        if (WinningCells is null) return false;
+        foreach (var (wr, wc) in WinningCells)
+            if (wr == row && wc == col) return true;
+        return false;
+    }
+}

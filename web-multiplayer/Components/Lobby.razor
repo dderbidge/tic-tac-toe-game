@@ -1,0 +1,49 @@
+<div class="lobby-panel">
+    <div class="lobby-self">
+        <div class="label">You are</div>
+        <div class="your-name">@YourName</div>
+    </div>
+
+    @if (PendingChallengeFor is not null)
+    {
+        <div class="lobby-pending">
+            Waiting for @PendingChallengeFor to respond…
+            <button class="btn btn-link" @onclick="OnCancelPending">Cancel</button>
+        </div>
+    }
+    else if (Players.Count == 0)
+    {
+        <div class="lobby-empty">No other players right now. Share the URL with someone to play.</div>
+    }
+    else
+    {
+        <div class="lobby-list">
+            @foreach (var p in Players)
+            {
+                var capture = p;
+                <div class="lobby-row">
+                    <span class="name">@capture.Name</span>
+                    <button class="btn btn-primary btn-challenge"
+                            @onclick="@(() => OnChallenge.InvokeAsync(capture.ConnId))">
+                        ⚔ Challenge
+                    </button>
+                </div>
+            }
+        </div>
+    }
+
+    <div class="menu-buttons">
+        <button class="btn btn-secondary" @onclick="OnLeave">Back to menu</button>
+    </div>
+</div>
+
+@code {
+    public sealed record LobbyEntry(string ConnId, string Name);
+
+    [Parameter, EditorRequired] public string YourName { get; set; } = default!;
+    [Parameter] public IReadOnlyList<LobbyEntry> Players { get; set; } = Array.Empty<LobbyEntry>();
+    [Parameter] public string? PendingChallengeFor { get; set; }
+    [Parameter] public EventCallback<string> OnChallenge { get; set; }
+    [Parameter] public EventCallback OnCancelPending { get; set; }
+    [Parameter] public EventCallback OnLeave { get; set; }
+}

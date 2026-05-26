@@ -1,0 +1,56 @@
+@using TicTacToe.Core
+
+<div class="menu-panel">
+    <h2 class="subtitle">Choose your faction</h2>
+    <div class="faction-row">
+        <button class="faction-card faction-ascendant @(SelectedFaction == Player.Ascendant ? "selected" : "")"
+                @onclick="@(() => SelectedFaction = Player.Ascendant)">
+            <div class="sigil sigil-ascendant"><span class="sigil-glyph">@ThemeText.Sun</span></div>
+            <div class="faction-name">@ThemeText.AscendantName</div>
+            <div class="faction-note">Moves first</div>
+        </button>
+        <button class="faction-card faction-vanguard @(SelectedFaction == Player.Vanguard ? "selected" : "")"
+                @onclick="@(() => SelectedFaction = Player.Vanguard)">
+            <div class="sigil sigil-vanguard"><span class="sigil-glyph">@ThemeText.Sparkle</span></div>
+            <div class="faction-name">@ThemeText.VanguardName</div>
+            <div class="faction-note">Moves second</div>
+        </button>
+    </div>
+
+    <h2 class="subtitle">Choose opponent difficulty</h2>
+    <div class="difficulty-row">
+        @foreach (var d in new[] { Difficulty.Recruit, Difficulty.Captain, Difficulty.Warlord })
+        {
+            var capture = d;
+            <button class="difficulty-card @(SelectedDifficulty == capture ? "selected" : "")"
+                    @onclick="@(() => SelectedDifficulty = capture)">
+                <div class="difficulty-name">@ThemeText.DifficultyName(capture)</div>
+                <div class="difficulty-note">@DifficultyNote(capture)</div>
+            </button>
+        }
+    </div>
+
+    <div class="menu-buttons">
+        <button class="btn btn-secondary" @onclick="OnBack">Back</button>
+        <button class="btn btn-primary" @onclick="HandleStart">Begin duel</button>
+    </div>
+</div>
+
+@code {
+    [Parameter] public EventCallback OnBack { get; set; }
+    [Parameter] public EventCallback<(Player faction, Difficulty difficulty)> OnStart { get; set; }
+
+    private Player SelectedFaction = Player.Ascendant;
+    private Difficulty SelectedDifficulty = Difficulty.Captain;
+
+    private static string DifficultyNote(Difficulty d) => d switch
+    {
+        Difficulty.Recruit => "Random — beatable warm-up.",
+        Difficulty.Captain => "Tactical — wins or blocks one move ahead.",
+        Difficulty.Warlord => "Unbeatable — perfect play.",
+        _                  => ""
+    };
+
+    private async Task HandleStart()
+        => await OnStart.InvokeAsync((SelectedFaction, SelectedDifficulty));
+}

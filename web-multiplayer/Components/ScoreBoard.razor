@@ -1,0 +1,30 @@
+@using TicTacToe.Core
+
+<div class="score-board">
+    <div class="score score-ascendant">
+        <span class="score-sigil">@ThemeText.Sun</span>
+        <span class="score-name">@ThemeText.AscendantName</span>
+        <span class="score-value">@AscendantWins</span>
+    </div>
+    <div class="score score-draws">
+        <span class="score-name">Stalemates</span>
+        <span class="score-value">@Draws</span>
+    </div>
+    <div class="score score-vanguard">
+        <span class="score-sigil">@ThemeText.Sparkle</span>
+        <span class="score-name">@ThemeText.VanguardName</span>
+        <span class="score-value">@VanguardWins</span>
+    </div>
+    @if (ShowReset)
+    {
+        <button class="btn btn-link" @onclick="OnReset">Reset score</button>
+    }
+</div>
+
+@code {
+    [Parameter] public int AscendantWins { get; set; }
+    [Parameter] public int VanguardWins { get; set; }
+    [Parameter] public int Draws { get; set; }
+    [Parameter] public bool ShowReset { get; set; }
+    [Parameter] public EventCallback OnReset { get; set; }
+}

@@ -1,0 +1,107 @@
+@page "/"
+@using TicTacToe.Core
+@inject GameSession Session
+@implements IDisposable
+
+<div class="app-shell">
+    <main class="app-main">
+        @switch (Session.Phase)
+        {
+            case GamePhase.MainMenu:
+                <MainMenu OnHotSeat="StartHotSeat"
+                          OnVsComputer="GoToModeSetup" />
+                break;
+
+            case GamePhase.ModeSetup:
+                <ModeSetup OnBack="GoToMainMenu"
+                           OnStart="StartVersusComputer" />
+                break;
+
+            case GamePhase.InMatch:
+            case GamePhase.MatchOver:
+                <div class="match-panel">
+                    <div class="status-banner">
+                        @if (Session.Phase == GamePhase.MatchOver)
+                        {
+                            @if (Session.Winner is { } w)
+                            {
+                                <span class="status-text status-@FactionClass(w)">@ThemeText.WinMessage(w)</span>
+                            }
+                            else if (Session.IsDraw)
+                            {
+                                <span class="status-text">@ThemeText.DrawMessage()</span>
+                            }
+                        }
+                        else if (Session.AiThinking)
+                        {
+                            <span class="status-text status-@FactionClass(Session.Active) status-thinking">
+                                @ThemeText.NameOf(Session.Active) considers the grid…
+                            </span>
+                        }
+                        else
+                        {
+                            <span class="status-text status-@FactionClass(Session.Active)">
+                                @ThemeText.NameOf(Session.Active) — claim a sector
+                            </span>
+                        }
+                    </div>
+
+                    <BoardView Board="Session.Board"
+                               HoverPlayer="HoverPlayer"
+                               AcceptingClicks="@(Session.Phase == GamePhase.InMatch && !Session.AiThinking && (!Session.VersusComputer || Session.Active == Session.HumanSide))"
+                               WinningCells="Session.WinningCells"
+                               OnCellClick="OnCellClick" />
+
+                    <ScoreBoard AscendantWins="Session.AscendantWins"
+                                VanguardWins="Session.VanguardWins"
+                                Draws="Session.Draws"
+                                ShowReset="true"
+                                OnReset="ResetScore" />
+
+                    @if (Session.Phase == GamePhase.MatchOver)
+                    {
+                        <div class="menu-buttons">
+                            <button class="btn btn-primary" @onclick="PlayAgain">Play again</button>
+                            <button class="btn btn-secondary" @onclick="GoToMainMenu">Main menu</button>
+                        </div>
+                    }
+                </div>
+                break;
+        }
+    </main>
+</div>
+
+@code {
+    private Player HoverPlayer => Session.VersusComputer ? Session.HumanSide : Session.Active;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Session.OnChange += HandleStateChange;
+        await Session.LoadScoresAsync();
+    }
+
+    private void HandleStateChange() => InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Session.OnChange -= HandleStateChange;
+
+    private void StartHotSeat() => Session.StartHotSeat();
+    private void GoToModeSetup() => Session.GoToModeSetup();
+    private void GoToMainMenu() => Session.GoToMainMenu();
+
+    private async Task StartVersusComputer((Player faction, Difficulty difficulty) args)
+        => await Session.StartVersusComputerAsync(args.faction, args.difficulty);
+
+    private async Task OnCellClick((int row, int col) move)
+        => await Session.TryHumanMoveAsync(move.row, move.col);
+
+    private async Task PlayAgain() => await Session.PlayAgainAsync();
+
+    private async Task ResetScore() => await Session.ResetScoresAsync();
+
+    private static string FactionClass(Player p) => p switch
+    {
+        Player.Ascendant => "ascendant",
+        Player.Vanguard  => "vanguard",
+        _                => "none"
+    };
+}
