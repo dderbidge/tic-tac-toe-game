@@ -69,6 +69,16 @@ public sealed class PresenceTracker
         Changed?.Invoke();
     }
 
+    public void RestoreMatch(string connectionId, string name, string matchId)
+    {
+        lock (_gate)
+        {
+            _sessions[connectionId] = new PlayerSession(connectionId, name, DateTimeOffset.UtcNow);
+            _matchByConnection[connectionId] = matchId;
+        }
+        Changed?.Invoke();
+    }
+
     public void LeaveMatch(string connectionId)
     {
         lock (_gate) _matchByConnection.Remove(connectionId);

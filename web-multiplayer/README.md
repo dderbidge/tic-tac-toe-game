@@ -12,6 +12,41 @@ dotnet run --project web-multiplayer --urls http://localhost:5050
 
 Open http://localhost:5050 in two browser windows to test multiplayer.
 
+## Reconnect authorization
+
+Each accepted player receives a separate 256-bit cryptographically random
+`reconnectToken` in their private `OnChallengeAccepted` message. The client keeps
+it in the current Blazor component's memory and supplies it with the match ID to
+`RejoinMatch(matchId, reconnectToken)` after SignalR reconnects. This method
+returns `true` on success and `false` if authorization or the reconnect window
+is invalid. Knowing a match ID alone does not authorize reconnection.
+
+The token identifies one player in one match. A different connection can take
+that player's seat only while it is disconnected and before its 30-second grace
+deadline. The token stays valid across repeated disconnects during the match;
+it is invalidated on a win, draw, forfeit, or match removal. Tokens are excluded
+from shared state and lobby messages. Reconnection, disconnect expiry, moves,
+and forfeits use the registry lock so stale timer callbacks cannot forfeit a
+successfully rejoined player. A forfeit requires the caller's current connection
+to belong to that match.
+
+This preserves automatic SignalR reconnection within the existing Blazor
+circuit. Reloading the page, closing its circuit, or restarting the server does
+not preserve the match credentials. Tokens are bearer credentials: serve the
+app over HTTPS and do not put them in URLs or logs.
+
+## Automated tests
+
+With the .NET 9 SDK installed, run:
+
+```bash
+dotnet test tests/TicTacToe.WebMultiplayer.Tests -c Release
+```
+
+The suite covers token validation and lifecycle, participant authorization,
+disconnect and expiry races, and real SignalR clients reconnecting and
+continuing a match through a local test server.
+
 ## Deploy to a Linux host
 
 The repo ships with a generic deploy script and systemd unit template.

@@ -79,6 +79,10 @@
                 break;
 
             case AppPhase.NetworkLobby:
+                @if (_networkNotice is not null)
+                {
+                    <p class="status-text" role="status">@_networkNotice</p>
+                }
                 <Lobby YourName="@_yourName"
                        Players="@_lobbyPlayers"
                        PendingChallengeFor="@_pendingTargetName"
@@ -94,6 +98,10 @@
                         @if (_phase == AppPhase.NetworkMatchOver)
                         {
                             <span class="status-text status-@(_netResultClass)">@_netEndMessage</span>
+                        }
+                        else if (_recoveringConnection)
+                        {
+                            <span class="status-text" role="status">Reconnecting…</span>
                         }
                         else
                         {
@@ -112,7 +120,7 @@
 
                     <BoardView Board="@_netBoard"
                                HoverPlayer="@_yourFaction"
-                               AcceptingClicks="@(_phase == AppPhase.NetworkInMatch && _netActiveFaction == _yourFaction && !_opponentDisconnected)"
+                               AcceptingClicks="@(_phase == AppPhase.NetworkInMatch && _netActiveFaction == _yourFaction && !_opponentDisconnected && !_recoveringConnection)"
                                WinningCells="@_netWinningCells"
                                OnCellClick="OnNetCellClick" />
 
@@ -157,6 +165,12 @@
     private string? _incomingChallengeFromConnId;
     private string? _incomingChallengeFromName;
     private string? _matchId;
+    // Kept only in this component's memory for the current match. It never belongs
+    // in lobby state, URLs, or a shared match-state payload.
+    private string? _reconnectToken;
+    private CancellationTokenSource? _rejoinCancellation;
+    private bool _recoveringConnection;
+    private string? _networkNotice;
     private string _opponentName = "";
     private Player _yourFaction = Player.None;
     private Board _netBoard = new();
@@ -175,7 +189,7 @@
     public async ValueTask DisposeAsync()
     {
         Local.OnChange -= HandleLocalChange;
-        if (_hub is not null) await _hub.DisposeAsync();
+        await TeardownHubAsync();
     }
 
     private void HandleLocalChange()
@@ -205,10 +219,11 @@
     private async Task StartVersusComputer((Player faction, Difficulty difficulty) args)
         => await Local.StartVersusComputerAsync(args.faction, args.difficulty);
 
-    private void GoToMainMenu()
+    private async Task GoToMainMenu()
     {
         _phase = AppPhase.MainMenu;
         Local.GoToMainMenu();
+        await TeardownHubAsync();
     }
 
     private async Task OnLocalCellClick((int row, int col) move)
@@ -220,10 +235,12 @@
     // Network mode handlers
     private async Task GoToNetwork()
     {
+        _networkNotice = null;
         _phase = AppPhase.NetworkConnecting;
         StateHasChanged();
         await EnsureHubAsync();
-        await _hub!.SendAsync("EnterLobby");
+        if (_phase == AppPhase.NetworkConnecting && _hub is not null)
+            await _hub.SendAsync("EnterLobby");
     }
 
     private async Task LeaveNetwork()
@@ -243,25 +260,41 @@
             .WithAutomaticReconnect()
             .Build();
 
-        _hub.On<LobbyState>("OnLobbyState", OnLobbyState);
-        _hub.On<PlayerInfo>("OnPlayerJoined", OnPlayerJoined);
-        _hub.On<PlayerLeft>("OnPlayerLeft", OnPlayerLeft);
-        _hub.On<IncomingChallenge>("OnIncomingChallenge", OnIncomingChallenge);
-        _hub.On<ChallengeResolution>("OnChallengeAccepted", OnChallengeAccepted);
-        _hub.On<DeclineMessage>("OnChallengeDeclined", OnChallengeDeclined);
-        _hub.On<ChallengeExpiredMsg>("OnChallengeExpired", OnChallengeExpired);
-        _hub.On<MatchStateMsg>("OnMatchState", OnMatchState);
-        _hub.On<DisconnectInfo>("OnOpponentDisconnected", OnOpponentDisconnected);
-        _hub.On("OnOpponentReconnected", OnOpponentReconnected);
-        _hub.On<MatchEnded>("OnMatchEnded", OnMatchEnded);
+        var hub = _hub;
+        // Serialize hub callbacks with UI events and reconnect cleanup on the
+        // component dispatcher, including while an invocation is awaiting a reply.
+        Task Receive(Action callback) => InvokeAsync(() =>
+        {
+            if (_hub == hub) callback();
+        });
+        hub.On<LobbyState>("OnLobbyState", s => Receive(() => OnLobbyState(s)));
+        hub.On<PlayerInfo>("OnPlayerJoined", p => Receive(() => OnPlayerJoined(p)));
+        hub.On<PlayerLeft>("OnPlayerLeft", p => Receive(() => OnPlayerLeft(p)));
+        hub.On<IncomingChallenge>("OnIncomingChallenge", c => Receive(() => OnIncomingChallenge(c)));
+        hub.On<ChallengeResolution>("OnChallengeAccepted", r => Receive(() => OnChallengeAccepted(r)));
+        hub.On<DeclineMessage>("OnChallengeDeclined", m => Receive(() => OnChallengeDeclined(m)));
+        hub.On<ChallengeExpiredMsg>("OnChallengeExpired", e => Receive(() => OnChallengeExpired(e)));
+        hub.On<MatchStateMsg>("OnMatchState", m => Receive(() => OnMatchState(m)));
+        hub.On<DisconnectInfo>("OnOpponentDisconnected", d => Receive(() => OnOpponentDisconnected(d)));
+        hub.On("OnOpponentReconnected", () => Receive(OnOpponentReconnected));
+        hub.On<MatchEnded>("OnMatchEnded", e => Receive(() => OnMatchEnded(e)));
 
-        await _hub.StartAsync();
+        hub.Reconnecting += _ => InvokeAsync(() =>
+        {
+            if (_hub != hub) return;
+            _recoveringConnection = true;
+            CancelRejoinAttempt();
+            StateHasChanged();
+        });
+        hub.Reconnected += _ => InvokeAsync(() => RestoreNetworkSessionAsync(hub));
+
+        await hub.StartAsync();
     }
 
     private async Task TeardownHubAsync()
     {
-        if (_hub is null) return;
-        await _hub.DisposeAsync();
+        ClearReconnectCredentials();
+        var hub = _hub;
         _hub = null;
         _yourConnId = "";
         _yourName = "";
@@ -270,6 +303,83 @@
         _pendingTargetName = null;
         _incomingChallengeId = null;
         _matchId = null;
+        if (hub is not null) await hub.DisposeAsync();
+    }
+
+    private async Task RestoreNetworkSessionAsync(HubConnection hub)
+    {
+        if (_hub != hub) return;
+
+        _yourConnId = hub.ConnectionId ?? "";
+        CancelRejoinAttempt();
+        using var cancellation = new CancellationTokenSource();
+        _rejoinCancellation = cancellation;
+        _recoveringConnection = true;
+
+        try
+        {
+            if (_phase != AppPhase.NetworkInMatch || _matchId is null)
+            {
+                if (_phase == AppPhase.NetworkLobby)
+                    await hub.InvokeAsync("EnterLobby", cancellation.Token);
+                return;
+            }
+
+            var matchId = _matchId;
+            var reconnectToken = _reconnectToken;
+            // SignalR may reconnect before the old connection's disconnect handler
+            // runs. Retry briefly without letting a live slot be claimed early.
+            for (var attempt = 0; !string.IsNullOrEmpty(reconnectToken) && attempt < 40; attempt++)
+            {
+                if (_hub != hub || _matchId != matchId || _reconnectToken != reconnectToken ||
+                    _phase != AppPhase.NetworkInMatch || hub.State != HubConnectionState.Connected)
+                    return;
+
+                if (await hub.InvokeAsync<bool>("RejoinMatch", matchId, reconnectToken, cancellation.Token))
+                    return;
+
+                await Task.Delay(TimeSpan.FromMilliseconds(250), cancellation.Token);
+            }
+
+            if (_hub != hub || _matchId != matchId || _reconnectToken != reconnectToken ||
+                _phase != AppPhase.NetworkInMatch)
+                return;
+
+            // Rejected or expired credentials do not become a win or a new identity
+            // in the old match. The player can start a new match from the lobby.
+            _reconnectToken = null;
+            _networkNotice = "The match could not be rejoined. You can start a new match.";
+            await ReturnToLobby();
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception) when (hub.State != HubConnectionState.Connected)
+        {
+            // A further connection loss is handled by automatic reconnect again.
+        }
+        finally
+        {
+            if (ReferenceEquals(_rejoinCancellation, cancellation))
+            {
+                _rejoinCancellation = null;
+                _recoveringConnection = hub.State != HubConnectionState.Connected;
+                StateHasChanged();
+            }
+        }
+    }
+
+    private void CancelRejoinAttempt()
+    {
+        _rejoinCancellation?.Cancel();
+        _rejoinCancellation = null;
+    }
+
+    private void ClearReconnectCredentials()
+    {
+        _reconnectToken = null;
+        CancelRejoinAttempt();
+        _recoveringConnection = false;
     }
 
     private async Task ChallengePlayerByConnId(string targetConnId)
@@ -316,6 +426,7 @@
 
     private async Task ReturnToLobby()
     {
+        ClearReconnectCredentials();
         _phase = AppPhase.NetworkLobby;
         _matchId = null;
         _netBoard = new Board();
@@ -331,7 +442,7 @@
     private record PlayerInfo(string ConnectionId, string Name);
     private record PlayerLeft(string connId);
     private record IncomingChallenge(string challengeId, string fromConnId, string fromName);
-    private record ChallengeResolution(string matchId, string opponentName, string yourFaction);
+    private record ChallengeResolution(string matchId, string opponentName, string yourFaction, string reconnectToken);
     private record DeclineMessage(string fromName);
     private record ChallengeExpiredMsg(string challengeId, string role);
     private record MatchStateMsg(string matchId, int[][] board, string activeFaction, string? winner, bool isDraw, CellRef[]? winningCells);
@@ -376,7 +487,10 @@
 
     private void OnChallengeAccepted(ChallengeResolution r)
     {
+        ClearReconnectCredentials();
         _matchId = r.matchId;
+        _reconnectToken = r.reconnectToken;
+        _networkNotice = null;
         _opponentName = r.opponentName;
         _yourFaction = r.yourFaction == "Ascendant" ? Player.Ascendant : Player.Vanguard;
         _netBoard = new Board();
@@ -407,12 +521,15 @@
 
     private void OnMatchState(MatchStateMsg m)
     {
-        _matchId = m.matchId;
+        if (m.matchId != _matchId) return;
+        // An in-flight snapshot can arrive after the match-ended event.
+        if (_phase == AppPhase.NetworkMatchOver && m.winner is null && !m.isDraw) return;
         _netBoard = DeserializeBoard(m.board);
         _netActiveFaction = ParsePlayer(m.activeFaction);
         _netWinningCells = m.winningCells?.Select(c => (c.row, c.col)).ToArray();
         if (m.winner is not null || m.isDraw)
         {
+            ClearReconnectCredentials();
             _phase = AppPhase.NetworkMatchOver;
         }
         else
@@ -436,6 +553,8 @@
 
     private void OnMatchEnded(MatchEnded e)
     {
+        if (e.matchId != _matchId) return;
+        ClearReconnectCredentials();
         _phase = AppPhase.NetworkMatchOver;
         _netEndMessage = (e.result, e.reason) switch
         {
