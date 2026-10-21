@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.SignalR;
 using TicTacToe.Core;
@@ -43,23 +42,15 @@ public class GameHub : Hub
     {
         var connId = Context.ConnectionId;
 
-        var matchId = _presence.CurrentMatchOf(connId);
-        if (matchId is not null)
-        {
-            var m = _matches.Get(matchId);
-            if (m is not null && m.Winner is null && !m.IsDraw)
-            {
-                m.DisconnectedConnId = connId;
-                m.DisconnectTimer?.Dispose();
-                m.DisconnectTimer = new Timer(_ => OnGraceExpired(matchId, connId),
-                    null, TimeSpan.FromSeconds(DisconnectGraceSeconds), Timeout.InfiniteTimeSpan);
-                var partnerConnId = m.AscendantConnId == connId ? m.VanguardConnId : m.AscendantConnId;
-                await _hub.Clients.Client(partnerConnId)
-                    .SendAsync("OnOpponentDisconnected", new { secondsLeft = DisconnectGraceSeconds });
-            }
-        }
+        // Match membership is authoritative, including if lobby presence was removed earlier.
+        var notifications = new List<Task>();
+        foreach (var id in _matches.ActiveMatchesContaining(connId))
+            _matches.MarkDisconnected(id, connId, TimeSpan.FromSeconds(DisconnectGraceSeconds), OnGraceExpired,
+                partnerConnId => notifications.Add(_hub.Clients.Client(partnerConnId)
+                    .SendAsync("OnOpponentDisconnected", new { secondsLeft = DisconnectGraceSeconds })));
         _presence.Remove(connId);
         _challenges.RemoveAllInvolving(connId);
+        await Task.WhenAll(notifications);
         await Clients.Group(LobbyGroup).SendAsync("OnPlayerLeft", new { connId });
         await base.OnDisconnectedAsync(exception);
     }
@@ -135,13 +126,15 @@ public class GameHub : Hub
         {
             matchId = match.MatchId,
             opponentName = c.ToName,
-            yourFaction = "Ascendant"
+            yourFaction = "Ascendant",
+            reconnectToken = match.AscendantReconnectToken
         });
         await Clients.Client(c.ToConnId).SendAsync("OnChallengeAccepted", new
         {
             matchId = match.MatchId,
             opponentName = c.FromName,
-            yourFaction = "Vanguard"
+            yourFaction = "Vanguard",
+            reconnectToken = match.VanguardReconnectToken
         });
 
         await BroadcastMatchState(match);
@@ -184,26 +177,23 @@ public class GameHub : Hub
         return Task.CompletedTask;
     }
 
-    public async Task RejoinMatch(string matchId)
+    public async Task<bool> RejoinMatch(string matchId, string? reconnectToken)
     {
         var connId = Context.ConnectionId;
-        var m = _matches.Get(matchId);
-        if (m is null) return;
-        if (m.DisconnectedConnId is null) return;
+        Task reconnectedNotification = Task.CompletedTask;
+        var m = _matches.TryRejoin(matchId, connId, reconnectToken, match =>
+        {
+            var name = match.AscendantConnId == connId ? match.AscendantName : match.VanguardName;
+            _presence.RestoreMatch(connId, name, match.MatchId);
+            var partnerConnId = match.AscendantConnId == connId ? match.VanguardConnId : match.AscendantConnId;
+            reconnectedNotification = _hub.Clients.Client(partnerConnId).SendAsync("OnOpponentReconnected");
+        });
+        if (m is null) return false;
 
-        var oldConnId = m.DisconnectedConnId;
-        if (m.AscendantConnId == oldConnId) m.AscendantConnId = connId;
-        else if (m.VanguardConnId == oldConnId) m.VanguardConnId = connId;
-        else return;
-
-        m.DisconnectedConnId = null;
-        m.DisconnectTimer?.Dispose();
-        m.DisconnectTimer = null;
-
-        _presence.EnterMatch(connId, m.MatchId);
-        var partnerConnId = m.AscendantConnId == connId ? m.VanguardConnId : m.AscendantConnId;
-        await Clients.Client(partnerConnId).SendAsync("OnOpponentReconnected");
+        await Clients.Group(LobbyGroup).SendAsync("OnPlayerLeft", new { connId });
+        await reconnectedNotification;
         await BroadcastMatchState(m);
+        return true;
     }
 
     // ─── Helpers ───────────────────────────────────────────────────
@@ -248,20 +238,18 @@ public class GameHub : Hub
         _matches.Remove(m.MatchId);
     }
 
-    private void OnGraceExpired(string matchId, string disconnectedConnId)
+    private void OnGraceExpired(string matchId, string disconnectedConnId, Guid disconnectId)
     {
-        var m = _matches.Get(matchId);
-        if (m is null || m.DisconnectedConnId != disconnectedConnId) return;
-        m.Winner = m.AscendantConnId == disconnectedConnId ? Player.Vanguard : Player.Ascendant;
-        var partnerConnId = m.AscendantConnId == disconnectedConnId ? m.VanguardConnId : m.AscendantConnId;
-        _hub.Clients.Client(partnerConnId).SendAsync("OnMatchEnded", new
+        var m = _matches.ForfeitDisconnected(matchId, disconnectedConnId, disconnectId);
+        if (m is null) return;
+        try
         {
-            matchId = m.MatchId,
-            result = "win",
-            reason = "forfeit",
-            winningCells = (object?)null
-        }).GetAwaiter().GetResult();
-        EndMatchAndReturnPlayersToLobby(m);
+            BroadcastMatchEnded(m, reason: "forfeit").GetAwaiter().GetResult();
+        }
+        finally
+        {
+            EndMatchAndReturnPlayersToLobby(m);
+        }
     }
 
     private static int[][] SerializeBoard(Board b)
