@@ -1,8 +1,10 @@
 @using System.Linq
 @using Microsoft.AspNetCore.SignalR.Client
+@using Microsoft.Extensions.Hosting
 @implements IAsyncDisposable
 @inject LocalGameSession Local
 @inject NavigationManager Nav
+@inject Microsoft.AspNetCore.Hosting.IWebHostEnvironment HostEnvironment
 
 <div class="app-shell">
     <main class="app-main">
@@ -124,6 +126,28 @@
                                WinningCells="@_netWinningCells"
                                OnCellClick="OnNetCellClick" />
 
+                    @if (HostEnvironment.IsDevelopment() && _phase == AppPhase.NetworkInMatch)
+                    {
+                        <details class="connection-test-panel">
+                            <summary>Local test controls</summary>
+                            <div class="connection-test-buttons">
+                                <button class="btn btn-secondary" disabled="@(_recoveringConnection || _connectionTestCancellation is not null)"
+                                        @onclick="@(() => TestConnectionAsync(TimeSpan.FromSeconds(3)))">Test reconnect</button>
+                                <button class="btn btn-secondary" disabled="@(_recoveringConnection || _connectionTestCancellation is not null)"
+                                        @onclick="@(() => TestConnectionAsync(TimeSpan.FromSeconds(35)))">Test timeout</button>
+                            </div>
+                            <p class="connection-test-help">Reconnect pauses for 3 seconds. Timeout pauses for 35 seconds; your opponent wins after 30 seconds.</p>
+                            @if (_connectionTestStatus is not null)
+                            {
+                                <p role="status">@_connectionTestStatus</p>
+                            }
+                            @if (_connectionTestCancellation is not null || _hub?.State != HubConnectionState.Connected)
+                            {
+                                <button class="btn btn-link" @onclick="GoToMainMenu">Cancel test and return to menu</button>
+                            }
+                        </details>
+                    }
+
                     @if (_phase == AppPhase.NetworkMatchOver)
                     {
                         <div class="menu-buttons">
@@ -169,6 +193,8 @@
     // in lobby state, URLs, or a shared match-state payload.
     private string? _reconnectToken;
     private CancellationTokenSource? _rejoinCancellation;
+    private CancellationTokenSource? _connectionTestCancellation;
+    private string? _connectionTestStatus;
     private bool _recoveringConnection;
     private string? _networkNotice;
     private string _opponentName = "";
@@ -379,7 +405,61 @@
     {
         _reconnectToken = null;
         CancelRejoinAttempt();
+        _connectionTestCancellation?.Cancel();
+        _connectionTestCancellation = null;
+        _connectionTestStatus = null;
         _recoveringConnection = false;
+    }
+
+    private async Task TestConnectionAsync(TimeSpan pause)
+    {
+        // This is a local Development aid, never an externally callable hub action.
+        if (!HostEnvironment.IsDevelopment() || _phase != AppPhase.NetworkInMatch ||
+            _hub is not { State: HubConnectionState.Connected } hub ||
+            _matchId is null || _reconnectToken is null || _recoveringConnection ||
+            _connectionTestCancellation is not null)
+            return;
+
+        using var cancellation = new CancellationTokenSource();
+        _connectionTestCancellation = cancellation;
+        var matchId = _matchId;
+        _recoveringConnection = true;
+        _connectionTestStatus = $"Connection paused for {pause.TotalSeconds:0} seconds. Watch the other player's window.";
+        StateHasChanged();
+
+        try
+        {
+            // Keep the Blazor circuit alive while restarting only this player's
+            // separate game connection. Stop/Start does not raise Reconnected.
+            await hub.StopAsync(cancellation.Token);
+            await Task.Delay(pause, cancellation.Token);
+            if (_hub != hub || _matchId != matchId || _phase != AppPhase.NetworkInMatch)
+                return;
+
+            _connectionTestStatus = "Restoring the saved match…";
+            StateHasChanged();
+            await hub.StartAsync(cancellation.Token);
+            await RestoreNetworkSessionAsync(hub);
+            if (_hub == hub && _matchId == matchId && _phase == AppPhase.NetworkInMatch)
+                _connectionTestStatus = "Reconnected. The same match is ready to continue.";
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception)
+        {
+            if (_hub == hub)
+                _connectionTestStatus = "The connection test could not finish. Return to the menu and reconnect.";
+        }
+        finally
+        {
+            if (ReferenceEquals(_connectionTestCancellation, cancellation))
+            {
+                _connectionTestCancellation = null;
+                _recoveringConnection = hub.State != HubConnectionState.Connected;
+                StateHasChanged();
+            }
+        }
     }
 
     private async Task ChallengePlayerByConnId(string targetConnId)
@@ -420,7 +500,7 @@
 
     private async Task OnNetCellClick((int row, int col) move)
     {
-        if (_hub is null || _matchId is null) return;
+        if (_hub is null || _matchId is null || _recoveringConnection) return;
         await _hub.SendAsync("PlaceMove", _matchId, move.row, move.col);
     }
 
@@ -530,6 +610,7 @@
         if (m.winner is not null || m.isDraw)
         {
             ClearReconnectCredentials();
+            _opponentDisconnected = false;
             _phase = AppPhase.NetworkMatchOver;
         }
         else
@@ -555,6 +636,7 @@
     {
         if (e.matchId != _matchId) return;
         ClearReconnectCredentials();
+        _opponentDisconnected = false;
         _phase = AppPhase.NetworkMatchOver;
         _netEndMessage = (e.result, e.reason) switch
         {

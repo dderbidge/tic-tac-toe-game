@@ -65,7 +65,23 @@ The console version has a 10-scenario regression checklist (`console/tests/smoke
 pwsh -File console/tests/smoke.ps1
 ```
 
-The web app's verification is currently manual — open it in a browser and play.
+The single-player web app's verification is currently manual — open it in a browser and play.
+
+For multiplayer security checks, run this from the repository root with
+PowerShell 7 and the .NET 9 SDK installed:
+
+```powershell
+pwsh -File ./test-multiplayer.ps1
+```
+
+The command starts its own temporary local test server, checks reconnects and
+forfeit authorization, and returns a failure status if any check fails. There
+is no need to start the app or arrange another player. Use `-Repeat 10` to repeat
+the checks when investigating intermittent failures. Test reports are saved in
+`artifacts/test-results/`; GitHub runs the same checks on pull requests.
+
+See [the multiplayer testing guide](web-multiplayer/README.md#testing-multiplayer)
+for the local two-player playtest.
 
 ## Replacing the placeholder art
 
