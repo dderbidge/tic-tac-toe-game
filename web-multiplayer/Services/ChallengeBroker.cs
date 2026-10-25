@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 
 namespace TicTacToe.WebMultiplayer.Services;
@@ -27,7 +28,7 @@ public sealed class ChallengeBroker : IDisposable
         _sweeper = new Timer(_ => SweepExpired(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
     }
 
-    public Challenge Create(string fromConn, string fromName, string toConn, string toName)
+    public Challenge? Create(string fromConn, string fromName, string toConn, string toName)
     {
         var c = new Challenge(
             ChallengeId: Guid.NewGuid().ToString("N")[..10],
@@ -36,30 +37,44 @@ public sealed class ChallengeBroker : IDisposable
             ToConnId: toConn,
             ToName: toName,
             ExpiresAt: DateTimeOffset.UtcNow + Lifetime);
-        lock (_gate) _challenges[c.ChallengeId] = c;
+        lock (_gate)
+        {
+            // Each player can act on only one pending invitation in the UI.
+            if (fromConn == toConn || _challenges.Values.Any(existing => existing.ExpiresAt > DateTimeOffset.UtcNow &&
+                (existing.FromConnId == fromConn || existing.ToConnId == fromConn ||
+                 existing.FromConnId == toConn || existing.ToConnId == toConn))) return null;
+            _challenges[c.ChallengeId] = c;
+        }
         return c;
     }
 
-    public Challenge? Take(string challengeId)
+    public Challenge? Take(string? challengeId, string recipientConnId)
     {
+        if (string.IsNullOrEmpty(challengeId)) return null;
         lock (_gate)
         {
+            if (!_challenges.TryGetValue(challengeId, out var pending) ||
+                pending.ToConnId != recipientConnId || pending.ExpiresAt <= DateTimeOffset.UtcNow) return null;
             if (_challenges.Remove(challengeId, out var c)) return c;
             return null;
         }
     }
 
-    public bool Cancel(string challengeId, string fromConnId)
+    public Challenge? Cancel(string? challengeId, string fromConnId)
     {
+        if (string.IsNullOrEmpty(challengeId)) return null;
         lock (_gate)
         {
             if (_challenges.TryGetValue(challengeId, out var c) && c.FromConnId == fromConnId)
-                return _challenges.Remove(challengeId);
-            return false;
+            {
+                _challenges.Remove(challengeId);
+                return c;
+            }
+            return null;
         }
     }
 
-    public void RemoveAllInvolving(string connectionId)
+    public IReadOnlyList<Challenge> RemoveAllInvolving(string connectionId)
     {
         List<Challenge> toRemove = new();
         lock (_gate)
@@ -69,6 +84,7 @@ public sealed class ChallengeBroker : IDisposable
                     toRemove.Add(c);
             foreach (var c in toRemove) _challenges.Remove(c.ChallengeId);
         }
+        return toRemove;
     }
 
     private void SweepExpired()

@@ -1,26 +1,33 @@
 @using TicTacToe.Core
 
-<div class="cell @CellClass()" @onclick="HandleClick">
+<button type="button" class="cell @CellClass()" @onclick="HandleClick"
+        disabled="@(Content != Player.None || !IsHoverEnabled)" aria-label="@AccessibleLabel">
     @if (Content != Player.None)
     {
-        <div class="sigil sigil-@FactionClass(Content) @(IsHighlighted ? "won" : "")">
+        <span aria-hidden="true" class="sigil sigil-@FactionClass(Content) @(IsHighlighted ? "won" : "")">
             <span class="sigil-glyph">@ThemeText.SymbolOf(Content)</span>
-        </div>
+        </span>
     }
     else if (HoverPlayer != Player.None && IsHoverEnabled)
     {
-        <div class="sigil sigil-@FactionClass(HoverPlayer) sigil-ghost">
+        <span aria-hidden="true" class="sigil sigil-@FactionClass(HoverPlayer) sigil-ghost">
             <span class="sigil-glyph">@ThemeText.SymbolOf(HoverPlayer)</span>
-        </div>
+        </span>
     }
-</div>
+</button>
 
 @code {
+    [Parameter] public int Row { get; set; }
+    [Parameter] public int Column { get; set; }
     [Parameter] public Player Content { get; set; } = Player.None;
     [Parameter] public Player HoverPlayer { get; set; } = Player.None;
     [Parameter] public bool IsHoverEnabled { get; set; }
     [Parameter] public bool IsHighlighted { get; set; }
     [Parameter] public EventCallback OnClick { get; set; }
+
+    private string AccessibleLabel => $"Row {Row + 1}, column {Column + 1}: "
+        + (Content == Player.None ? "empty" : ThemeText.NameOf(Content))
+        + (IsHighlighted ? ", winning cell" : "");
 
     private string CellClass()
     {

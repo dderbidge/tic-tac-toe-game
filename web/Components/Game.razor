@@ -20,7 +20,7 @@
             case GamePhase.InMatch:
             case GamePhase.MatchOver:
                 <div class="match-panel">
-                    <div class="status-banner">
+                    <div class="status-banner" role="status" aria-live="polite" aria-atomic="true">
                         @if (Session.Phase == GamePhase.MatchOver)
                         {
                             @if (Session.Winner is { } w)
@@ -58,13 +58,13 @@
                                 ShowReset="true"
                                 OnReset="ResetScore" />
 
-                    @if (Session.Phase == GamePhase.MatchOver)
-                    {
-                        <div class="menu-buttons">
+                    <div class="menu-buttons">
+                        @if (Session.Phase == GamePhase.MatchOver)
+                        {
                             <button class="btn btn-primary" @onclick="PlayAgain">Play again</button>
-                            <button class="btn btn-secondary" @onclick="GoToMainMenu">Main menu</button>
-                        </div>
-                    }
+                        }
+                        <button class="btn btn-secondary" @onclick="GoToMainMenu">Main menu</button>
+                    </div>
                 </div>
                 break;
         }

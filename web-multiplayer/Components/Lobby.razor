@@ -8,7 +8,7 @@
     {
         <div class="lobby-pending">
             Waiting for @PendingChallengeFor to respond…
-            <button class="btn btn-link" @onclick="OnCancelPending">Cancel</button>
+            <button class="btn btn-link" disabled="@CancelPendingDisabled" @onclick="OnCancelPending">Cancel</button>
         </div>
     }
     else if (Players.Count == 0)
@@ -43,6 +43,7 @@
     [Parameter, EditorRequired] public string YourName { get; set; } = default!;
     [Parameter] public IReadOnlyList<LobbyEntry> Players { get; set; } = Array.Empty<LobbyEntry>();
     [Parameter] public string? PendingChallengeFor { get; set; }
+    [Parameter] public bool CancelPendingDisabled { get; set; }
     [Parameter] public EventCallback<string> OnChallenge { get; set; }
     [Parameter] public EventCallback OnCancelPending { get; set; }
     [Parameter] public EventCallback OnLeave { get; set; }

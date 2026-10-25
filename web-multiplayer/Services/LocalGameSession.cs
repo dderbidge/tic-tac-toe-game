@@ -15,6 +15,7 @@ public enum LocalPhase
 public sealed class LocalGameSession
 {
     private const int AiDeliberationMs = 600;
+    private int _matchVersion;
 
     public LocalPhase Phase { get; private set; } = LocalPhase.MainMenu;
     public Board Board { get; private set; } = new();
@@ -43,6 +44,7 @@ public sealed class LocalGameSession
 
     public void GoToModeSetup()
     {
+        InvalidateAiTurn();
         Phase = LocalPhase.ModeSetup;
         NotifyChanged();
     }
@@ -58,6 +60,7 @@ public sealed class LocalGameSession
 
     private void BeginMatch()
     {
+        InvalidateAiTurn();
         Board = new Board();
         Active = Player.Ascendant;
         Winner = null;
@@ -69,6 +72,7 @@ public sealed class LocalGameSession
 
     public void GoToMainMenu()
     {
+        InvalidateAiTurn();
         Phase = LocalPhase.MainMenu;
         NotifyChanged();
     }
@@ -94,10 +98,15 @@ public sealed class LocalGameSession
 
     private async Task PlayAiTurnAsync()
     {
-        if (Phase != LocalPhase.InMatch) return;
+        if (Phase != LocalPhase.InMatch || !VersusComputer || Active == HumanSide || AiThinking) return;
+        var version = _matchVersion;
         AiThinking = true;
         NotifyChanged();
         await Task.Delay(AiDeliberationMs);
+
+        // A menu change or a new match invalidates this delayed turn, even if the
+        // replacement match happens to be waiting for the same faction.
+        if (version != _matchVersion || Phase != LocalPhase.InMatch) return;
 
         var (row, col) = Ai.ChooseMove(Board, Active, AiDifficulty);
         Board.TryPlace(row, col, Active);
@@ -106,6 +115,12 @@ public sealed class LocalGameSession
         if (CheckEnd()) return;
         Active = Board.Other(Active);
         NotifyChanged();
+    }
+
+    private void InvalidateAiTurn()
+    {
+        _matchVersion++;
+        AiThinking = false;
     }
 
     public void ResetScores()

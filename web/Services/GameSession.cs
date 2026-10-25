@@ -19,6 +19,7 @@ public sealed class GameSession
     private readonly IJSRuntime _js;
     private const string ScoresKey = "tictactoe.scores.v1";
     private const int AiDeliberationMs = 600;
+    private int _matchVersion;
 
     public GameSession(IJSRuntime js) { _js = js; }
 
@@ -94,6 +95,7 @@ public sealed class GameSession
 
     public void GoToModeSetup()
     {
+        InvalidateAiTurn();
         Phase = GamePhase.ModeSetup;
         NotifyChanged();
     }
@@ -110,6 +112,7 @@ public sealed class GameSession
 
     private void BeginMatch()
     {
+        InvalidateAiTurn();
         Board = new Board();
         Active = Player.Ascendant;
         Winner = null;
@@ -121,6 +124,7 @@ public sealed class GameSession
 
     public void GoToMainMenu()
     {
+        InvalidateAiTurn();
         Phase = GamePhase.MainMenu;
         NotifyChanged();
     }
@@ -147,11 +151,16 @@ public sealed class GameSession
 
     private async Task PlayAiTurnAsync()
     {
-        if (Phase != GamePhase.InMatch) return;
+        if (Phase != GamePhase.InMatch || !VersusComputer || Active == HumanSide || AiThinking) return;
+        var version = _matchVersion;
         AiThinking = true;
         NotifyChanged();
 
         await Task.Delay(AiDeliberationMs);
+
+        // A menu change or a new match invalidates this delayed turn, even if the
+        // replacement match happens to be waiting for the same faction.
+        if (version != _matchVersion || Phase != GamePhase.InMatch) return;
 
         var (row, col) = Ai.ChooseMove(Board, Active, AiDifficulty);
         Board.TryPlace(row, col, Active);
@@ -160,6 +169,12 @@ public sealed class GameSession
         if (CheckEnd()) return;
         Active = Board.Other(Active);
         NotifyChanged();
+    }
+
+    private void InvalidateAiTurn()
+    {
+        _matchVersion++;
+        AiThinking = false;
     }
 
     private bool CheckEnd()
