@@ -1,13 +1,13 @@
 @using TicTacToe.Core
 
-<div class="board-grid">
+<div class="board-grid" role="group" aria-label="Tic-tac-toe board">
     @for (int r = 0; r < 3; r++)
     {
         @for (int c = 0; c < 3; c++)
         {
             var row = r;
             var col = c;
-            <Cell Content="@Board.At(row, col)"
+            <Cell Row="@row" Column="@col" Content="@Board.At(row, col)"
                   HoverPlayer="@HoverPlayer"
                   IsHoverEnabled="@(IsCellInteractive(row, col))"
                   IsHighlighted="@IsWinningCell(row, col)"

@@ -17,5 +17,7 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../web-multiplayer/TicTacToe.WebMultiplayer.csproj" />
+    <!-- Exercise the WASM session logic without requiring a browser runtime. -->
+    <Compile Include="../../web/Services/GameSession.cs" Link="GameSession.cs" />
   </ItemGroup>
 </Project>

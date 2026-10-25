@@ -49,7 +49,8 @@ public class GameHub : Hub
                 partnerConnId => notifications.Add(_hub.Clients.Client(partnerConnId)
                     .SendAsync("OnOpponentDisconnected", new { secondsLeft = DisconnectGraceSeconds })));
         _presence.Remove(connId);
-        _challenges.RemoveAllInvolving(connId);
+        foreach (var challenge in _challenges.RemoveAllInvolving(connId))
+            notifications.Add(NotifyChallengeCancelled(challenge));
         await Task.WhenAll(notifications);
         await Clients.Group(LobbyGroup).SendAsync("OnPlayerLeft", new { connId });
         await base.OnDisconnectedAsync(exception);
@@ -70,9 +71,9 @@ public class GameHub : Hub
         {
             yourConnId = connId,
             yourName = me.Name,
-            players = others
+            players = others.Select(p => new LobbyPlayer(p.ConnectionId, p.Name))
         });
-        await Clients.OthersInGroup(LobbyGroup).SendAsync("OnPlayerJoined", new { connId, name = me.Name });
+        await Clients.OthersInGroup(LobbyGroup).SendAsync("OnPlayerJoined", new LobbyPlayer(connId, me.Name));
     }
 
     public async Task LeaveLobby()
@@ -80,39 +81,52 @@ public class GameHub : Hub
         var connId = Context.ConnectionId;
         await Groups.RemoveFromGroupAsync(connId, LobbyGroup);
         _presence.Remove(connId);
-        _challenges.RemoveAllInvolving(connId);
+        foreach (var challenge in _challenges.RemoveAllInvolving(connId))
+            await NotifyChallengeCancelled(challenge);
         await Clients.Group(LobbyGroup).SendAsync("OnPlayerLeft", new { connId });
     }
 
     // ─── Challenges ────────────────────────────────────────────────
 
-    public async Task ChallengePlayer(string targetConnectionId)
+    public async Task<string?> ChallengePlayer(string? targetConnectionId)
     {
         var fromConnId = Context.ConnectionId;
+        if (string.IsNullOrWhiteSpace(targetConnectionId) || targetConnectionId == fromConnId) return null;
         var from = _presence.Get(fromConnId);
         var to = _presence.Get(targetConnectionId);
-        if (from is null || to is null) return;
-        if (_presence.CurrentMatchOf(fromConnId) is not null) return;
-        if (_presence.CurrentMatchOf(targetConnectionId) is not null) return;
+        if (from is null || to is null) return null;
+        if (_presence.CurrentMatchOf(fromConnId) is not null) return null;
+        if (_presence.CurrentMatchOf(targetConnectionId) is not null) return null;
 
         var c = _challenges.Create(fromConnId, from.Name, targetConnectionId, to.Name);
+        if (c is null) return null;
+        // Queue the sender's identity before the recipient can answer. The final
+        // invocation result may arrive after a fast decline or cancellation.
+        await Clients.Caller.SendAsync("OnChallengeSent", new { challengeId = c.ChallengeId, targetConnId = targetConnectionId });
         await Clients.Client(targetConnectionId).SendAsync("OnIncomingChallenge", new
         {
             challengeId = c.ChallengeId,
             fromConnId,
             fromName = from.Name
         });
+        return c.ChallengeId;
     }
 
     public async Task RespondToChallenge(string challengeId, bool accept)
     {
-        var c = _challenges.Take(challengeId);
+        var c = _challenges.Take(challengeId, Context.ConnectionId);
         if (c is null) return;
-        if (c.ToConnId != Context.ConnectionId) return;
+
+        if (_presence.Get(c.FromConnId) is null || _presence.Get(c.ToConnId) is null ||
+            _presence.CurrentMatchOf(c.FromConnId) is not null || _presence.CurrentMatchOf(c.ToConnId) is not null)
+        {
+            await NotifyChallengeCancelled(c);
+            return;
+        }
 
         if (!accept)
         {
-            await Clients.Client(c.FromConnId).SendAsync("OnChallengeDeclined", new { fromName = c.ToName });
+            await Clients.Client(c.FromConnId).SendAsync("OnChallengeDeclined", new { challengeId = c.ChallengeId, fromName = c.ToName });
             return;
         }
 
@@ -140,11 +154,15 @@ public class GameHub : Hub
         await BroadcastMatchState(match);
     }
 
-    public Task CancelChallenge(string challengeId)
+    public async Task CancelChallenge(string challengeId)
     {
-        _challenges.Cancel(challengeId, Context.ConnectionId);
-        return Task.CompletedTask;
+        var challenge = _challenges.Cancel(challengeId, Context.ConnectionId);
+        if (challenge is not null) await NotifyChallengeCancelled(challenge);
     }
+
+    private Task NotifyChallengeCancelled(Challenge challenge) =>
+        _hub.Clients.Clients(challenge.FromConnId, challenge.ToConnId)
+            .SendAsync("OnChallengeCancelled", new { challengeId = challenge.ChallengeId });
 
     // ─── Match ─────────────────────────────────────────────────────
 

@@ -20,6 +20,125 @@ namespace TicTacToe.WebMultiplayer.Tests;
 public sealed class GameHubIntegrationTests
 {
     [Fact]
+    public async Task Live_lobby_join_uses_the_same_player_contract_as_the_snapshot_and_can_be_challenged()
+    {
+        await using var server = await LiveServer.StartAsync();
+        await using var first = await server.JoinAsync();
+        await using var second = await server.JoinAsync();
+
+        var joined = await first.NextAsync("OnPlayerJoined");
+        var player = joined.Deserialize<LobbyPlayer>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.NotNull(player);
+        Assert.Equal(second.ConnectionId, player.ConnectionId);
+        Assert.Equal(server.Presence.Get(second.ConnectionId)!.Name, player.Name);
+
+        await first.Connection.InvokeAsync("ChallengePlayer", player.ConnectionId);
+        var incoming = await second.NextAsync("OnIncomingChallenge");
+        Assert.Equal(first.ConnectionId, incoming.GetProperty("fromConnId").GetString());
+    }
+
+    [Fact]
+    public async Task Challenge_acknowledgement_returns_the_id_delivered_to_the_recipient()
+    {
+        await using var server = await LiveServer.StartAsync();
+        await using var sender = await server.JoinAsync();
+        await using var recipient = await server.JoinAsync();
+
+        var challengeId = await sender.Connection.InvokeAsync<string?>("ChallengePlayer", recipient.ConnectionId);
+        var incoming = await recipient.NextAsync("OnIncomingChallenge");
+        var sent = await sender.NextAsync("OnChallengeSent");
+        Assert.False(string.IsNullOrWhiteSpace(challengeId));
+        Assert.Equal(incoming.GetProperty("challengeId").GetString(), challengeId);
+        Assert.Equal(challengeId, sent.GetProperty("challengeId").GetString());
+        Assert.Equal(recipient.ConnectionId, sent.GetProperty("targetConnId").GetString());
+    }
+
+    [Fact]
+    public async Task Sender_cancellation_notifies_both_players_and_prevents_late_acceptance()
+    {
+        await using var server = await LiveServer.StartAsync();
+        await using var sender = await server.JoinAsync();
+        await using var recipient = await server.JoinAsync();
+        var challengeId = await sender.Connection.InvokeAsync<string?>("ChallengePlayer", recipient.ConnectionId);
+        await recipient.NextAsync("OnIncomingChallenge");
+
+        await sender.Connection.InvokeAsync("CancelChallenge", challengeId);
+        var senderCancelled = await sender.NextAsync("OnChallengeCancelled");
+        var recipientCancelled = await recipient.NextAsync("OnChallengeCancelled");
+        Assert.Equal(challengeId, senderCancelled.GetProperty("challengeId").GetString());
+        Assert.Equal(challengeId, recipientCancelled.GetProperty("challengeId").GetString());
+
+        await recipient.Connection.InvokeAsync("RespondToChallenge", challengeId, true);
+        Assert.Null(server.Presence.CurrentMatchOf(sender.ConnectionId));
+        Assert.Null(server.Presence.CurrentMatchOf(recipient.ConnectionId));
+        Assert.DoesNotContain(sender.Received, message => message.Method == "OnChallengeAccepted");
+        Assert.DoesNotContain(recipient.Received, message => message.Method == "OnChallengeAccepted");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Outsider_response_does_not_consume_the_recipient_challenge(bool accept)
+    {
+        await using var server = await LiveServer.StartAsync();
+        await using var sender = await server.JoinAsync();
+        await using var recipient = await server.JoinAsync();
+        await using var outsider = await server.JoinAsync();
+        var challengeId = await sender.Connection.InvokeAsync<string?>("ChallengePlayer", recipient.ConnectionId);
+        await recipient.NextAsync("OnIncomingChallenge");
+
+        await outsider.Connection.InvokeAsync("RespondToChallenge", challengeId, accept);
+        Assert.Null(server.Presence.CurrentMatchOf(sender.ConnectionId));
+        Assert.Null(server.Presence.CurrentMatchOf(recipient.ConnectionId));
+        Assert.Null(server.Presence.CurrentMatchOf(outsider.ConnectionId));
+
+        await recipient.Connection.InvokeAsync("RespondToChallenge", challengeId, true);
+        var senderAccepted = await sender.NextAsync("OnChallengeAccepted");
+        var recipientAccepted = await recipient.NextAsync("OnChallengeAccepted");
+        var matchId = senderAccepted.GetProperty("matchId").GetString();
+        Assert.Equal(matchId, recipientAccepted.GetProperty("matchId").GetString());
+        Assert.Equal(matchId, server.Presence.CurrentMatchOf(sender.ConnectionId));
+        Assert.Equal(matchId, server.Presence.CurrentMatchOf(recipient.ConnectionId));
+        Assert.Null(server.Presence.CurrentMatchOf(outsider.ConnectionId));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("missing-player")]
+    [InlineData("self")]
+    public async Task Invalid_or_self_challenge_target_is_rejected_without_creating_a_challenge(string? target)
+    {
+        await using var server = await LiveServer.StartAsync();
+        await using var sender = await server.JoinAsync();
+        if (target == "self") target = sender.ConnectionId;
+
+        var challengeId = await sender.Connection.InvokeAsync<string?>("ChallengePlayer", target);
+
+        Assert.Null(challengeId);
+        Assert.Null(server.Presence.CurrentMatchOf(sender.ConnectionId));
+        Assert.DoesNotContain(sender.Received, message => message.Method == "OnIncomingChallenge");
+    }
+
+    [Fact]
+    public async Task Expired_challenge_cannot_be_accepted_before_the_next_sweep()
+    {
+        // An already elapsed deadline avoids a wall-clock sleep or a race with the five-second sweeper.
+        await using var server = await LiveServer.StartAsync(TimeSpan.FromSeconds(-1));
+        await using var sender = await server.JoinAsync();
+        await using var recipient = await server.JoinAsync();
+        var challengeId = await sender.Connection.InvokeAsync<string?>("ChallengePlayer", recipient.ConnectionId);
+        await recipient.NextAsync("OnIncomingChallenge");
+
+        await recipient.Connection.InvokeAsync("RespondToChallenge", challengeId, true);
+
+        Assert.Null(server.Presence.CurrentMatchOf(sender.ConnectionId));
+        Assert.Null(server.Presence.CurrentMatchOf(recipient.ConnectionId));
+        Assert.DoesNotContain(sender.Received, message => message.Method == "OnChallengeAccepted");
+        Assert.DoesNotContain(recipient.Received, message => message.Method == "OnChallengeAccepted");
+    }
+
+    [Fact]
     public async Task Acceptance_sends_each_player_only_their_token_and_shared_state_contains_no_credentials()
     {
         await using var server = await LiveServer.StartAsync();
@@ -174,7 +293,7 @@ public sealed class GameHubIntegrationTests
         public MatchRegistry Matches => app.Services.GetRequiredService<MatchRegistry>();
         public PresenceTracker Presence => app.Services.GetRequiredService<PresenceTracker>();
 
-        public static async Task<LiveServer> StartAsync()
+        public static async Task<LiveServer> StartAsync(TimeSpan? challengeLifetime = null)
         {
             var clock = new ManualTimeProvider();
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Testing" });
@@ -183,7 +302,7 @@ public sealed class GameHubIntegrationTests
             builder.Services.AddSignalR();
             builder.Services.AddSingleton<PresenceTracker>();
             builder.Services.AddSingleton(new MatchRegistry(clock));
-            builder.Services.AddSingleton<ChallengeBroker>();
+            builder.Services.AddSingleton(new ChallengeBroker { Lifetime = challengeLifetime ?? TimeSpan.FromSeconds(30) });
             var app = builder.Build();
             app.MapHub<GameHub>("/gamehub");
             await app.StartAsync();
@@ -222,7 +341,8 @@ public sealed class GameHubIntegrationTests
         {
             Connection = connection;
             foreach (var method in new[] { "OnLobbyState", "OnPlayerJoined", "OnPlayerLeft", "OnIncomingChallenge",
-                "OnChallengeAccepted", "OnMatchState", "OnMatchEnded", "OnOpponentDisconnected" })
+                "OnChallengeAccepted", "OnChallengeSent", "OnChallengeCancelled", "OnChallengeDeclined", "OnChallengeExpired",
+                "OnMatchState", "OnMatchEnded", "OnOpponentDisconnected" })
             {
                 var name = method;
                 _messages[name] = Channel.CreateUnbounded<JsonElement>();

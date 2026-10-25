@@ -23,7 +23,7 @@
             case AppPhase.LocalInMatch:
             case AppPhase.LocalMatchOver:
                 <div class="match-panel">
-                    <div class="status-banner">
+                    <div class="status-banner" role="status" aria-live="polite" aria-atomic="true">
                         @if (_phase == AppPhase.LocalMatchOver)
                         {
                             @if (Local.Winner is { } w)
@@ -61,13 +61,13 @@
                                 ShowReset="true"
                                 OnReset="ResetLocalScore" />
 
-                    @if (_phase == AppPhase.LocalMatchOver)
-                    {
-                        <div class="menu-buttons">
+                    <div class="menu-buttons">
+                        @if (_phase == AppPhase.LocalMatchOver)
+                        {
                             <button class="btn btn-primary" @onclick="PlayAgainLocal">Play again</button>
-                            <button class="btn btn-secondary" @onclick="GoToMainMenu">Main menu</button>
-                        </div>
-                    }
+                        }
+                        <button class="btn btn-secondary" @onclick="GoToMainMenu">Main menu</button>
+                    </div>
                 </div>
                 break;
 
@@ -88,6 +88,7 @@
                 <Lobby YourName="@_yourName"
                        Players="@_lobbyPlayers"
                        PendingChallengeFor="@_pendingTargetName"
+                       CancelPendingDisabled="@(_pendingChallengeId is null)"
                        OnChallenge="ChallengePlayerByConnId"
                        OnCancelPending="CancelPendingChallenge"
                        OnLeave="LeaveNetwork" />
@@ -96,7 +97,7 @@
             case AppPhase.NetworkInMatch:
             case AppPhase.NetworkMatchOver:
                 <div class="match-panel">
-                    <div class="status-banner">
+                    <div class="status-banner" role="status" aria-live="polite" aria-atomic="true">
                         @if (_phase == AppPhase.NetworkMatchOver)
                         {
                             <span class="status-text status-@(_netResultClass)">@_netEndMessage</span>
@@ -122,7 +123,7 @@
 
                     <BoardView Board="@_netBoard"
                                HoverPlayer="@_yourFaction"
-                               AcceptingClicks="@(_phase == AppPhase.NetworkInMatch && _netActiveFaction == _yourFaction && !_opponentDisconnected && !_recoveringConnection)"
+                               AcceptingClicks="@(_phase == AppPhase.NetworkInMatch && _netActiveFaction == _yourFaction && !_opponentDisconnected && !_recoveringConnection && !_forfeitPending)"
                                WinningCells="@_netWinningCells"
                                OnCellClick="OnNetCellClick" />
 
@@ -131,9 +132,9 @@
                         <details class="connection-test-panel">
                             <summary>Local test controls</summary>
                             <div class="connection-test-buttons">
-                                <button class="btn btn-secondary" disabled="@(_recoveringConnection || _connectionTestCancellation is not null)"
+                                <button class="btn btn-secondary" disabled="@(_recoveringConnection || _forfeitPending || _connectionTestCancellation is not null)"
                                         @onclick="@(() => TestConnectionAsync(TimeSpan.FromSeconds(3)))">Test reconnect</button>
-                                <button class="btn btn-secondary" disabled="@(_recoveringConnection || _connectionTestCancellation is not null)"
+                                <button class="btn btn-secondary" disabled="@(_recoveringConnection || _forfeitPending || _connectionTestCancellation is not null)"
                                         @onclick="@(() => TestConnectionAsync(TimeSpan.FromSeconds(35)))">Test timeout</button>
                             </div>
                             <p class="connection-test-help">Reconnect pauses for 3 seconds. Timeout pauses for 35 seconds; your opponent wins after 30 seconds.</p>
@@ -154,6 +155,15 @@
                             <button class="btn btn-primary" @onclick="ReturnToLobby">Back to lobby</button>
                             <button class="btn btn-secondary" @onclick="GoToMainMenu">Main menu</button>
                         </div>
+                    }
+                    else
+                    {
+                        <button class="btn btn-secondary" @onclick="ForfeitNetworkMatch"
+                                disabled="@(_recoveringConnection || _forfeitPending || _connectionTestCancellation is not null || _hub?.State != HubConnectionState.Connected)">Forfeit</button>
+                        @if (_networkNotice is not null)
+                        {
+                            <p role="status">@_networkNotice</p>
+                        }
                     }
                 </div>
                 break;
@@ -184,6 +194,7 @@
     private string _yourName = "";
     private List<Lobby.LobbyEntry> _lobbyPlayers = new();
     private string? _pendingChallengeId;
+    private string? _pendingTargetConnId;
     private string? _pendingTargetName;
     private string? _incomingChallengeId;
     private string? _incomingChallengeFromConnId;
@@ -205,6 +216,7 @@
     private string? _netEndMessage;
     private string _netResultClass = "ascendant";
     private bool _opponentDisconnected;
+    private bool _forfeitPending;
 
     // Lifecycle
     protected override void OnInitialized()
@@ -294,12 +306,14 @@
             if (_hub == hub) callback();
         });
         hub.On<LobbyState>("OnLobbyState", s => Receive(() => OnLobbyState(s)));
-        hub.On<PlayerInfo>("OnPlayerJoined", p => Receive(() => OnPlayerJoined(p)));
+        hub.On<LobbyPlayer>("OnPlayerJoined", p => Receive(() => OnPlayerJoined(p)));
         hub.On<PlayerLeft>("OnPlayerLeft", p => Receive(() => OnPlayerLeft(p)));
         hub.On<IncomingChallenge>("OnIncomingChallenge", c => Receive(() => OnIncomingChallenge(c)));
+        hub.On<ChallengeSentMsg>("OnChallengeSent", c => Receive(() => OnChallengeSent(c)));
         hub.On<ChallengeResolution>("OnChallengeAccepted", r => Receive(() => OnChallengeAccepted(r)));
         hub.On<DeclineMessage>("OnChallengeDeclined", m => Receive(() => OnChallengeDeclined(m)));
         hub.On<ChallengeExpiredMsg>("OnChallengeExpired", e => Receive(() => OnChallengeExpired(e)));
+        hub.On<ChallengeCancelledMsg>("OnChallengeCancelled", e => Receive(() => OnChallengeCancelled(e)));
         hub.On<MatchStateMsg>("OnMatchState", m => Receive(() => OnMatchState(m)));
         hub.On<DisconnectInfo>("OnOpponentDisconnected", d => Receive(() => OnOpponentDisconnected(d)));
         hub.On("OnOpponentReconnected", () => Receive(OnOpponentReconnected));
@@ -309,6 +323,10 @@
         {
             if (_hub != hub) return;
             _recoveringConnection = true;
+            _pendingChallengeId = null;
+            _pendingTargetName = null;
+            _pendingTargetConnId = null;
+            _incomingChallengeId = null;
             CancelRejoinAttempt();
             StateHasChanged();
         });
@@ -326,6 +344,7 @@
         _yourName = "";
         _lobbyPlayers.Clear();
         _pendingChallengeId = null;
+        _pendingTargetConnId = null;
         _pendingTargetName = null;
         _incomingChallengeId = null;
         _matchId = null;
@@ -403,6 +422,7 @@
 
     private void ClearReconnectCredentials()
     {
+        _forfeitPending = false;
         _reconnectToken = null;
         CancelRejoinAttempt();
         _connectionTestCancellation?.Cancel();
@@ -464,20 +484,55 @@
 
     private async Task ChallengePlayerByConnId(string targetConnId)
     {
-        if (_hub is null) return;
+        if (_hub is not { State: HubConnectionState.Connected } hub ||
+            _phase != AppPhase.NetworkLobby || _pendingTargetName is not null) return;
         var target = _lobbyPlayers.FirstOrDefault(p => p.ConnId == targetConnId);
         if (target is null) return;
-        _pendingChallengeId = "(awaiting server)";
         _pendingTargetName = target.Name;
-        await _hub.SendAsync("ChallengePlayer", targetConnId);
+        _pendingTargetConnId = targetConnId;
+        _networkNotice = null;
+        try
+        {
+            var challengeId = await hub.InvokeAsync<string?>("ChallengePlayer", targetConnId);
+            // The recipient may accept or we may leave while this acknowledgement
+            // is in flight. Never revive pending UI for an obsolete request.
+            if (_hub != hub || _phase != AppPhase.NetworkLobby || _pendingTargetName != target.Name)
+            {
+                if (challengeId is not null && hub.State == HubConnectionState.Connected)
+                    await hub.SendAsync("CancelChallenge", challengeId);
+                return;
+            }
+            _pendingChallengeId = challengeId;
+            if (challengeId is null)
+            {
+                _pendingTargetName = null;
+                _networkNotice = "That player is unavailable. Choose another player.";
+            }
+        }
+        catch (Exception)
+        {
+            if (_hub == hub && _phase == AppPhase.NetworkLobby)
+            {
+                _pendingChallengeId = null;
+                _pendingTargetName = null;
+                _networkNotice = "Could not send the challenge. Try again.";
+            }
+        }
     }
 
     private async Task CancelPendingChallenge()
     {
-        if (_hub is null || _pendingChallengeId is null) return;
-        await _hub.SendAsync("CancelChallenge", _pendingChallengeId);
-        _pendingChallengeId = null;
-        _pendingTargetName = null;
+        if (_hub is not { State: HubConnectionState.Connected } hub ||
+            _pendingChallengeId is not { } challengeId || _recoveringConnection) return;
+        try
+        {
+            await hub.InvokeAsync("CancelChallenge", challengeId);
+        }
+        catch (Exception)
+        {
+            if (_hub == hub && _pendingChallengeId == challengeId)
+                _networkNotice = "Could not cancel the challenge. Try again.";
+        }
         StateHasChanged();
     }
 
@@ -500,8 +555,34 @@
 
     private async Task OnNetCellClick((int row, int col) move)
     {
-        if (_hub is null || _matchId is null || _recoveringConnection) return;
+        if (_hub is null || _matchId is null || _recoveringConnection || _forfeitPending) return;
         await _hub.SendAsync("PlaceMove", _matchId, move.row, move.col);
+    }
+
+    private async Task ForfeitNetworkMatch()
+    {
+        if (_phase != AppPhase.NetworkInMatch || _matchId is not { } matchId ||
+            _hub is not { State: HubConnectionState.Connected } hub ||
+            _recoveringConnection || _forfeitPending || _connectionTestCancellation is not null)
+            return;
+
+        _forfeitPending = true;
+        _networkNotice = null;
+        try
+        {
+            // Wait for the existing server-authorized result; do not invent a
+            // local win/loss or leave the opponent in an abandoned match.
+            await hub.InvokeAsync("ForfeitMatch", matchId);
+        }
+        catch (Exception)
+        {
+            if (_hub == hub && _matchId == matchId && _phase == AppPhase.NetworkInMatch)
+                _networkNotice = "Could not forfeit. Reconnect and try again.";
+        }
+        finally
+        {
+            if (_hub == hub && _matchId == matchId) _forfeitPending = false;
+        }
     }
 
     private async Task ReturnToLobby()
@@ -518,19 +599,27 @@
     }
 
     // Hub message records
-    private record LobbyState(string yourConnId, string yourName, List<PlayerInfo> players);
-    private record PlayerInfo(string ConnectionId, string Name);
+    private record LobbyState(string yourConnId, string yourName, List<LobbyPlayer> players);
     private record PlayerLeft(string connId);
     private record IncomingChallenge(string challengeId, string fromConnId, string fromName);
+    private record ChallengeSentMsg(string challengeId, string targetConnId);
     private record ChallengeResolution(string matchId, string opponentName, string yourFaction, string reconnectToken);
-    private record DeclineMessage(string fromName);
+    private record DeclineMessage(string challengeId, string fromName);
     private record ChallengeExpiredMsg(string challengeId, string role);
+    private record ChallengeCancelledMsg(string challengeId);
     private record MatchStateMsg(string matchId, int[][] board, string activeFaction, string? winner, bool isDraw, CellRef[]? winningCells);
     private record CellRef(int row, int col);
     private record DisconnectInfo(int secondsLeft);
     private record MatchEnded(string matchId, string result, string reason, CellRef[]? winningCells);
 
     // Hub callbacks
+    private void OnChallengeSent(ChallengeSentMsg sent)
+    {
+        if (_phase == AppPhase.NetworkLobby && _pendingTargetName is not null &&
+            sent.targetConnId == _pendingTargetConnId)
+            _pendingChallengeId = sent.challengeId;
+    }
+
     private void OnLobbyState(LobbyState s)
     {
         _yourConnId = s.yourConnId;
@@ -543,7 +632,7 @@
         InvokeAsync(StateHasChanged);
     }
 
-    private void OnPlayerJoined(PlayerInfo p)
+    private void OnPlayerJoined(LobbyPlayer p)
     {
         if (p.ConnectionId == _yourConnId) return;
         if (_lobbyPlayers.Any(x => x.ConnId == p.ConnectionId)) return;
@@ -587,6 +676,7 @@
 
     private void OnChallengeDeclined(DeclineMessage m)
     {
+        if (m.challengeId != _pendingChallengeId) return;
         _pendingChallengeId = null;
         _pendingTargetName = null;
         InvokeAsync(StateHasChanged);
@@ -594,8 +684,15 @@
 
     private void OnChallengeExpired(ChallengeExpiredMsg e)
     {
-        if (e.role == "from") { _pendingChallengeId = null; _pendingTargetName = null; }
-        else if (e.role == "to") { _incomingChallengeId = null; }
+        if (e.role == "from" && e.challengeId == _pendingChallengeId) { _pendingChallengeId = null; _pendingTargetName = null; }
+        else if (e.role == "to" && e.challengeId == _incomingChallengeId) { _incomingChallengeId = null; }
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnChallengeCancelled(ChallengeCancelledMsg e)
+    {
+        if (e.challengeId == _pendingChallengeId) { _pendingChallengeId = null; _pendingTargetName = null; }
+        if (e.challengeId == _incomingChallengeId) _incomingChallengeId = null;
         InvokeAsync(StateHasChanged);
     }
 
