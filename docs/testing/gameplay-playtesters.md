@@ -11,12 +11,27 @@ From the repository root, using .NET 9:
 
 ```powershell
 $env:DOTNET_GENERATE_ASPNET_CERTIFICATE = 'false'
-$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
+$env:DOTNET_NOLOGO = '1'
 dotnet test tests/TicTacToe.WebMultiplayer.Tests -c Release --filter FullyQualifiedName~GameplayPlaytesterTests --logger 'trx;LogFileName=gameplay-playtesters.trx' --results-directory artifacts/test-results/playtesters
 ```
 
 The tests start their own server on a random loopback port. They do not use the
 live website or an existing development server. No accounts or paid APIs are used.
+
+`DOTNET_GENERATE_ASPNET_CERTIFICATE=false` is Microsoft's documented switch to
+prevent SDK first-run development-certificate generation. The root
+`test-multiplayer.ps1` runner sets it only for its invocation and restores the
+previous process value afterward. `DOTNET_NOLOGO` suppresses the welcome banner;
+it does not control certificates. `DOTNET_SKIP_FIRST_TIME_EXPERIENCE` has been
+unsupported since .NET Core 3.0 and is not a certificate safeguard. See
+[Microsoft's environment-variable reference](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-environment-variables#dotnet_generate_aspnet_certificate).
+
+Use a current .NET 9 servicing runtime for verification. A clean NuGet audit does
+not audit the installed shared ASP.NET Core runtime. The October 2026 verification
+also runs the built test assembly on isolated Microsoft.NETCore.App and
+Microsoft.AspNetCore.App 9.0.21 runtimes, downloaded from Microsoft's release
+manifest and verified against its SHA-512 hashes. Installing that task-local copy
+does not update any machine-wide runtime or deployment.
 
 ## Finite matrix
 
@@ -77,7 +92,4 @@ the tested revision. The 90-second cap is a regression budget. An optional
 failure. A thrown error carries the failure trace as `error.playtest`.
 
 The October 2026 verification used this runner through the supported browser tool,
-plus separate two-tab challenge, reconnect and forfeit checks. The existing
-Playwright smoke suite remains a separate option; do not treat it as executed
-merely because the tool-controlled runner passed.
-
+plus separate two-tab challenge, reconnect and forfeit checks.

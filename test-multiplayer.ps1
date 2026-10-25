@@ -21,9 +21,12 @@ $runDirectory = $null
 $totalPassed = 0
 $totalTests = 0
 $sdkDownload = 'https://dotnet.microsoft.com/download/dotnet/9.0'
+$previousCertificateSetting = $env:DOTNET_GENERATE_ASPNET_CERTIFICATE
 
 Push-Location -LiteralPath $PSScriptRoot
 try {
+    # These loopback HTTP tests do not need an SDK-generated HTTPS certificate.
+    $env:DOTNET_GENERATE_ASPNET_CERTIFICATE = 'false'
     $dotnet = Get-Command dotnet -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if ($null -eq $dotnet) {
@@ -90,6 +93,7 @@ catch {
     exit 1
 }
 finally {
+    $env:DOTNET_GENERATE_ASPNET_CERTIFICATE = $previousCertificateSetting
     Pop-Location
 }
 exit 0
